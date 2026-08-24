@@ -1,7 +1,18 @@
 # Compiled binary (same name as the module).
 /clusage
 
+# Release build output.
+/dist/
+
 # Go build and test output.
 *.exe
 *.test
 *.out
+
+# Local state, in case XDG_CONFIG_HOME ever points at a checkout.
+*.db
+*.db-wal
+*.db-shm
+
+# macOS
+.DS_Store
