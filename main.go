@@ -12,6 +12,9 @@ import (
 	"golang.org/x/term"
 )
 
+// version is overridden at release build time via -ldflags "-X main.version=…".
+var version = "dev"
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "clusage:", err)
@@ -20,6 +23,12 @@ func main() {
 }
 
 func run(args []string) error {
+	// --version is handled before the command dispatch below, which would
+	// otherwise route a leading flag to the TUI and open the alt screen.
+	if len(args) > 0 && (args[0] == "--version" || args[0] == "-version") {
+		fmt.Println("clusage", version)
+		return nil
+	}
 	cmd := "tui"
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		cmd, args = args[0], args[1:]

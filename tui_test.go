@@ -364,3 +364,31 @@ var errTest = errTestType{}
 type errTestType struct{}
 
 func (errTestType) Error() string { return "boom" }
+
+func TestVersionFlag(t *testing.T) {
+	// The Homebrew formula's smoke test runs "clusage --version", so it must
+	// succeed without a token, a config file, a database, or a TTY.
+	for _, flag := range []string{"--version", "-version"} {
+		if err := run([]string{flag}); err != nil {
+			t.Errorf("run(%q) = %v, want no error", flag, err)
+		}
+	}
+	// The default must stay a real value: the release build overwrites it, and
+	// an empty string would make the formula's assert_match pass on nothing.
+	if version == "" {
+		t.Error("version is empty")
+	}
+}
+
+func TestUnknownCommandIsReported(t *testing.T) {
+	// The formula also asserts on this message, so it must name every command.
+	err := run([]string{"nope"})
+	if err == nil {
+		t.Fatal("an unknown command returned no error")
+	}
+	for _, want := range []string{"tui", "setup", "usage"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q: %v", want, err)
+		}
+	}
+}
