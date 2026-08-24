@@ -1,0 +1,7 @@
+# Compiled binary (same name as the module).
+/clusage
+
+# Go build and test output.
+*.exe
+*.test
+*.out
