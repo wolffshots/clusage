@@ -75,6 +75,10 @@ go install github.com/wolffshots/clusage@latest
 That puts the binary in `$(go env GOPATH)/bin`. From a checkout, `go build -o
 clusage .` builds it in place.
 
+Both report `clusage dev` rather than a version number. The version is injected
+by the release build, and `go install` passes no linker flags. Use Homebrew or a
+release binary if you want `--version` to name the release.
+
 ### Platform support
 
 The keychain path is macOS only. `clusage setup` shells out to the `security`
@@ -224,8 +228,8 @@ which tests, cross-builds for Linux, Windows and macOS, and creates a GitHub
 release with the binaries and a `checksums.txt`.
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag -a v0.1.1 -m "clusage v0.1.1"
+git push origin v0.1.1
 ```
 
 The build injects the tag into `main.version` with
@@ -236,7 +240,24 @@ Then bump the Homebrew formula in
 `url` at the new tag and update `sha256`:
 
 ```sh
-curl -sL https://github.com/wolffshots/clusage/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
+curl -fL https://github.com/wolffshots/clusage/archive/refs/tags/v0.1.1.tar.gz | shasum -a 256
+```
+
+Two traps in that one command:
+
+- **Keep `-f`.** Without it, curl prints the 404 body and exits 0, so you hash
+  GitHub's error page. The result is 64 valid hex characters, and `brew style`
+  accepts it. The formula then fails for every user.
+- **Hash that exact URL.** `gh api repos/OWNER/REPO/tarball/TAG` returns a
+  different byte stream with a different hash, so a hash taken from it will not
+  match what Homebrew downloads.
+
+Verify before pushing the tap, which catches both:
+
+```sh
+brew style Formula/clusage.rb
+brew install --build-from-source wolffshots/tap/clusage
+brew test wolffshots/tap/clusage
 ```
 
 ## Credits
