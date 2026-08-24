@@ -392,3 +392,15 @@ func TestUnknownCommandIsReported(t *testing.T) {
 		}
 	}
 }
+
+func TestSaveTokenRejectsLineBreak(t *testing.T) {
+	// The keychain prompt reads one line for the value and one for the
+	// confirmation, so an embedded line break would store a truncated token and
+	// still report success. The guard runs before the command is started, so
+	// this test never touches the real keychain.
+	for _, bad := range []string{"abc\ndef", "abc\r\ndef", "abc\r", "\n"} {
+		if err := saveToken(bad); err == nil {
+			t.Errorf("saveToken(%q) was accepted; it would store a truncated token", bad)
+		}
+	}
+}

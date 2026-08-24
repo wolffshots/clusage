@@ -81,9 +81,21 @@ func loadConfig() (Config, string, error) {
 }
 
 // saveToken stores the OAuth token in the login keychain.
+//
+// The token goes in over stdin rather than as a "-w <token>" argument. Command
+// arguments are visible to any local process running ps for as long as the
+// command runs, so an argument would expose the token to every other user on
+// the machine. With -w last it prompts for the value and a confirmation, so the
+// token is written twice.
 func saveToken(token string) error {
+	if strings.ContainsAny(token, "\r\n") {
+		// The prompt reads one line per value. An embedded line break would
+		// store a truncated token and still report success.
+		return fmt.Errorf("token contains a line break")
+	}
 	cmd := exec.Command("security", "add-generic-password",
-		"-a", os.Getenv("USER"), "-s", keychainService, "-w", token, "-U")
+		"-a", os.Getenv("USER"), "-s", keychainService, "-U", "-w")
+	cmd.Stdin = strings.NewReader(token + "\n" + token + "\n")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("keychain write failed: %s", strings.TrimSpace(string(out)))
