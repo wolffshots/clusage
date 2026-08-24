@@ -30,22 +30,57 @@ Every reading goes into SQLite, which is what the history graphs draw from.
 
 ## Install
 
+### Homebrew (macOS / Linux)
+
+```sh
+brew install wolffshots/tap/clusage
+```
+
+Builds from source (Go is installed as a build-only dependency) via
+[wolffshots/homebrew-tap](https://github.com/wolffshots/homebrew-tap), so it
+works on Intel and Apple silicon Macs and on Linux, with no Gatekeeper
+quarantine step.
+
+### Prebuilt binaries
+
+Download the binary for your platform from the [latest release](https://github.com/wolffshots/clusage/releases/latest):
+
+| Platform | Asset |
+|---|---|
+| Linux x86-64 | `clusage_<version>_linux_amd64` |
+| Windows x86-64 | `clusage_<version>_windows_amd64.exe` |
+| macOS (Apple silicon) | `clusage_<version>_darwin_arm64` |
+
+On Linux/macOS, make it executable and check it runs:
+
+```sh
+chmod +x clusage_*          # the file you downloaded
+./clusage_* --version
+```
+
+macOS binaries are unsigned, so the first launch is blocked by Gatekeeper.
+Right-click then **Open**, or clear the quarantine flag with
+`xattr -d com.apple.quarantine clusage_*_darwin_arm64`. To verify a download,
+run `sha256sum -c checksums.txt` (Linux) or `shasum -a 256 -c checksums.txt`
+(macOS).
+
+### From source
+
 Go 1.25 or later is required.
 
 ```sh
 go install github.com/wolffshots/clusage@latest
 ```
 
-That puts the binary in `$(go env GOPATH)/bin`. To build from a source checkout
-instead:
+That puts the binary in `$(go env GOPATH)/bin`. From a checkout, `go build -o
+clusage .` builds it in place.
 
-```sh
-go build -o clusage .
-```
+### Platform support
 
-macOS only for now. The token is stored with the `security` command, which does
-not exist on Linux or Windows. Set `CLAUDE_CODE_OAUTH_TOKEN` in the environment
-to skip the keychain on those platforms.
+The keychain path is macOS only. `clusage setup` shells out to the `security`
+command, which does not exist on Linux or Windows. Set
+`CLAUDE_CODE_OAUTH_TOKEN` in the environment to skip the keychain on those
+platforms. Everything else works on all three.
 
 ## Setup
 
@@ -62,9 +97,10 @@ keychain when it is set.
 ## Run
 
 ```sh
-clusage           # open the TUI
-clusage tui       # the same thing, named explicitly
-clusage usage     # print one line per window and exit
+clusage             # open the TUI
+clusage tui         # the same thing, named explicitly
+clusage usage       # print one line per window and exit
+clusage --version   # print the version and exit
 ```
 
 The TUI opens on the last stored reading, so it shows numbers before it calls
@@ -180,6 +216,28 @@ go vet ./...
 
 `TestRenderTabs` drives the model through `Update` and logs each tab, so
 `go test -run TestRenderTabs -v .` prints the whole UI without a terminal.
+
+### Releasing
+
+Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which tests, cross-builds for Linux, Windows and macOS, and creates a GitHub
+release with the binaries and a `checksums.txt`.
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The build injects the tag into `main.version` with
+`-ldflags "-X main.version=<tag>"`, so `clusage --version` reports it.
+
+Then bump the Homebrew formula in
+[wolffshots/homebrew-tap](https://github.com/wolffshots/homebrew-tap). Point
+`url` at the new tag and update `sha256`:
+
+```sh
+curl -sL https://github.com/wolffshots/clusage/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
+```
 
 ## Credits
 
