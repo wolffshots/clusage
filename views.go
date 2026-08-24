@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
@@ -246,6 +247,115 @@ func xAxis(stamps []time.Time, width int) string {
 	return first + strings.Repeat(" ", gap) + last
 }
 
+// ---- Tokens tab ------------------------------------------------------------
+
+// tokensView graphs what clusage itself spent on probe calls: a cumulative
+// total over the chosen span, a per-call sparkline, and the breakdown by
+// stream with the cached share.
+func (m model) tokensView(height int) string {
+	span := historySpans[m.spanIdx]
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("clusage token spend") +
+		dimStyle.Render("   span ") + valueStyle.Render(span.label) +
+		dimStyle.Render("   s switches span") + "\n\n")
+
+	if len(m.tokens) == 0 {
+		b.WriteString(dimStyle.Render("no calls in this span — press r to fetch, or s for a longer span") + "\n\n")
+		b.WriteString(m.tokenTotalsBlock())
+		return clip(b.String(), height)
+	}
+
+	cum, per, stamps := tokenSeries(m.tokens)
+	chartW := contentWidth(m.width, 12)
+	// Leave the 15 rows the title, the x-axis, the per-call line, the
+	// breakdown, and the all-time line need, so the chart never pushes the
+	// all-time total off the bottom.
+	chartH := clamp(height-15, 3, 14)
+
+	top := cum[len(cum)-1]
+	rows := areaChart(cum, chartW, chartH, 0, top)
+	for i, row := range rows {
+		axis := ""
+		switch i {
+		case 0:
+			axis = commas(int64(top + 0.5))
+		case len(rows) - 1:
+			axis = "0"
+		}
+		b.WriteString(dimStyle.Render(padLeft(axis, 6)) + " " + positiveStyle.Render(row) + "\n")
+	}
+	b.WriteString(strings.Repeat(" ", 7) + dimStyle.Render(xAxis(stamps, chartW)) + "\n\n")
+
+	b.WriteString("  " + labelStyle.Render(padRight("per call", 12)) +
+		valueStyle.Render(sparkline(per, chartW)) + "\n\n")
+
+	var spanTotal tokenUse
+	for _, s := range m.tokens {
+		spanTotal = spanTotal.add(s.Used)
+	}
+	b.WriteString(tokenBreakdown(spanTotal, len(m.tokens), span.label))
+	if spanTotal.CacheRead == 0 && spanTotal.CacheCreate == 0 {
+		// A reader seeing two zero rows needs to know whether the counter is
+		// broken or the call is simply too small to cache.
+		b.WriteString(dimStyle.Render("  cache rows read 0 because a probe call is far under the ~1024 token cache minimum") + "\n")
+	}
+	b.WriteString("\n" + m.tokenTotalsBlock())
+	return clip(b.String(), height)
+}
+
+// tokenBreakdown lists one row per token stream, plus the cached share and the
+// per-call average.
+func tokenBreakdown(u tokenUse, calls int, label string) string {
+	var b strings.Builder
+	row := func(name string, v int64) {
+		b.WriteString("  " + labelStyle.Render(padRight(name, 12)) +
+			valueStyle.Render(padLeft(commas(v), 10)) + "\n")
+	}
+	b.WriteString("  " + titleStyle.Render("last "+label) + "\n")
+	row("input", u.Input)
+	row("output", u.Output)
+	row("cache write", u.CacheCreate)
+	row("cache read", u.CacheRead)
+	row("total", u.total())
+	avg := int64(0)
+	if calls > 0 {
+		avg = u.total() / int64(calls)
+	}
+	b.WriteString("  " + labelStyle.Render(padRight("calls", 12)) +
+		valueStyle.Render(padLeft(itoa(calls), 10)) +
+		labelStyle.Render("   avg ") + valueStyle.Render(commas(avg)+"/call") +
+		labelStyle.Render("   cached ") + valueStyle.Render(pct(u.cachedFrac())+" of input") + "\n")
+	return b.String()
+}
+
+// tokenTotalsBlock reports the all-time spend, which is not limited by the span.
+func (m model) tokenTotalsBlock() string {
+	t := m.tokenTotal
+	if m.tokenCalls == 0 {
+		return dimStyle.Render("  all time     no calls recorded yet")
+	}
+	return "  " + labelStyle.Render(padRight("all time", 12)) +
+		valueStyle.Render(commas(t.total())) + dimStyle.Render(" tokens over ") +
+		valueStyle.Render(itoa(m.tokenCalls)) + dimStyle.Render(" calls  ·  ") +
+		valueStyle.Render(commas(t.Input)) + dimStyle.Render(" in  ") +
+		valueStyle.Render(commas(t.Output)) + dimStyle.Render(" out  ") +
+		valueStyle.Render(commas(t.cached())) + dimStyle.Render(" cached")
+}
+
+// tokenSeries builds the cumulative total, the per-call total, and the call
+// times, oldest first.
+func tokenSeries(ss []TokenSample) (cum, per []float64, stamps []time.Time) {
+	var running float64
+	for _, s := range ss {
+		v := float64(s.Used.total())
+		running += v
+		cum = append(cum, running)
+		per = append(per, v)
+		stamps = append(stamps, s.CalledAt)
+	}
+	return cum, per, stamps
+}
+
 // ---- Config tab ------------------------------------------------------------
 
 // configView shows the effective config and what the schedule will do next.
@@ -293,6 +403,23 @@ func (m model) configView() string {
 }
 
 // ---- small helpers ---------------------------------------------------------
+
+// commas groups a token count in threes, e.g. 1204 becomes "1,204".
+func commas(n int64) string {
+	s := strconv.FormatInt(n, 10)
+	sign := ""
+	if strings.HasPrefix(s, "-") {
+		sign, s = "-", s[1:]
+	}
+	var out []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, c)
+	}
+	return sign + string(out)
+}
 
 func padRight(s string, w int) string {
 	if len(s) >= w {

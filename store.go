@@ -140,7 +140,88 @@ func openDB() (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+	// Separate table rather than columns on readings: a reading is written even
+	// when the API rejects the call and reports no usage, so the two are not
+	// always one to one.
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS calls (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		called_at TEXT NOT NULL,
+		model TEXT NOT NULL,
+		input INTEGER NOT NULL,
+		output INTEGER NOT NULL,
+		cache_create INTEGER NOT NULL,
+		cache_read INTEGER NOT NULL
+	)`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
+}
+
+// TokenSample is one probe call and what it cost.
+type TokenSample struct {
+	CalledAt time.Time
+	Model    string
+	Used     tokenUse
+}
+
+// saveTokens records what one probe call cost. A call with no usage block is
+// dropped, so a rejected call does not read as a free call.
+func saveTokens(db *sql.DB, s TokenSample) error {
+	if s.Used.total() == 0 {
+		return nil
+	}
+	_, err := db.Exec(
+		`INSERT INTO calls (called_at, model, input, output, cache_create, cache_read)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		s.CalledAt.UTC().Format(time.RFC3339Nano), s.Model,
+		s.Used.Input, s.Used.Output, s.Used.CacheCreate, s.Used.CacheRead)
+	return err
+}
+
+// tokenTotals sums every call ever recorded, and counts them.
+func tokenTotals(db *sql.DB) (tokenUse, int, error) {
+	var u tokenUse
+	var n int
+	err := db.QueryRow(`SELECT
+		COALESCE(SUM(input), 0), COALESCE(SUM(output), 0),
+		COALESCE(SUM(cache_create), 0), COALESCE(SUM(cache_read), 0),
+		COUNT(*) FROM calls`).
+		Scan(&u.Input, &u.Output, &u.CacheCreate, &u.CacheRead, &n)
+	if err != nil {
+		return tokenUse{}, 0, err
+	}
+	return u, n, nil
+}
+
+// tokensSince returns every call made at or after since, oldest first, for the
+// token graphs.
+func tokensSince(db *sql.DB, since time.Time) ([]TokenSample, error) {
+	rows, err := db.Query(
+		`SELECT called_at, model, input, output, cache_create, cache_read
+		 FROM calls WHERE called_at >= ? ORDER BY id`,
+		since.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TokenSample
+	for rows.Next() {
+		var ts string
+		var s TokenSample
+		if err := rows.Scan(&ts, &s.Model, &s.Used.Input, &s.Used.Output,
+			&s.Used.CacheCreate, &s.Used.CacheRead); err != nil {
+			return nil, err
+		}
+		at, err := time.Parse(time.RFC3339Nano, ts)
+		if err != nil {
+			continue // a row written by an older format; skip it rather than fail the view
+		}
+		s.CalledAt = at
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }
 
 func saveReading(db *sql.DB, r Reading) error {

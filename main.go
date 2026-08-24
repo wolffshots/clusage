@@ -109,7 +109,7 @@ func usage(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	headers, err := fetchUsage(ctx, token, *model)
+	headers, used, err := fetchUsage(ctx, token, *model)
 	if err != nil {
 		return err
 	}
@@ -120,7 +120,20 @@ func usage(args []string) error {
 	if err := saveReading(db, r); err != nil {
 		return err
 	}
+	if err := saveTokens(db, TokenSample{CalledAt: r.FetchedAt, Model: *model, Used: used}); err != nil {
+		return err
+	}
 	report(r, time.Now(), false, *verbose)
+	if *verbose {
+		total, calls, err := tokenTotals(db)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("this call: %d in, %d out, %d cache read, %d cache write\n",
+			used.Input, used.Output, used.CacheRead, used.CacheCreate)
+		fmt.Printf("all time:  %d tokens over %d calls (%d cached)\n",
+			total.total(), calls, total.cached())
+	}
 	return nil
 }
 

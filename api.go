@@ -16,14 +16,51 @@ import (
 // claudeCodeSystemPrompt is required for Claude Code OAuth tokens to be accepted.
 const claudeCodeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
 
-// fetchUsage makes the smallest possible inference call and returns the rate limit headers.
-func fetchUsage(ctx context.Context, token, model string) (map[string]string, error) {
+// tokenUse is what one probe call cost, taken from the response usage block.
+type tokenUse struct {
+	Input       int64 `json:"input"`
+	Output      int64 `json:"output"`
+	CacheCreate int64 `json:"cache_create"`
+	CacheRead   int64 `json:"cache_read"`
+}
+
+// total is every token the call was billed for, cache reads included.
+func (u tokenUse) total() int64 {
+	return u.Input + u.Output + u.CacheCreate + u.CacheRead
+}
+
+// cached is the part of the input that came from the prompt cache.
+func (u tokenUse) cached() int64 { return u.CacheRead }
+
+// cachedFrac is the cache read share of all input tokens, 0 when there is no input.
+func (u tokenUse) cachedFrac() float64 {
+	in := u.Input + u.CacheCreate + u.CacheRead
+	if in <= 0 {
+		return 0
+	}
+	return float64(u.CacheRead) / float64(in)
+}
+
+func (u tokenUse) add(v tokenUse) tokenUse {
+	return tokenUse{
+		Input:       u.Input + v.Input,
+		Output:      u.Output + v.Output,
+		CacheCreate: u.CacheCreate + v.CacheCreate,
+		CacheRead:   u.CacheRead + v.CacheRead,
+	}
+}
+
+// fetchUsage makes the smallest possible inference call and returns the rate
+// limit headers plus what the call itself cost in tokens. The token counts are
+// zero when the API rejected the call, because a rejected call carries the
+// headers but no usage block.
+func fetchUsage(ctx context.Context, token, model string) (map[string]string, tokenUse, error) {
 	client := anthropic.NewClient(
 		option.WithAuthToken(token),
 		option.WithHeader("anthropic-beta", "oauth-2025-04-20"),
 	)
 	var raw *http.Response
-	_, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.Model(model),
 		MaxTokens: 1,
 		System:    []anthropic.TextBlockParam{{Text: claudeCodeSystemPrompt}},
@@ -31,15 +68,24 @@ func fetchUsage(ctx context.Context, token, model string) (map[string]string, er
 			anthropic.NewUserMessage(anthropic.NewTextBlock("1")),
 		},
 	}, option.WithResponseInto(&raw))
+	var used tokenUse
+	if msg != nil {
+		used = tokenUse{
+			Input:       msg.Usage.InputTokens,
+			Output:      msg.Usage.OutputTokens,
+			CacheCreate: msg.Usage.CacheCreationInputTokens,
+			CacheRead:   msg.Usage.CacheReadInputTokens,
+		}
+	}
 	if raw != nil {
 		if h := rateLimitHeaders(raw.Header); len(h) > 0 {
-			return h, nil
+			return h, used, nil
 		}
 	}
 	if err != nil {
-		return nil, err
+		return nil, used, err
 	}
-	return nil, nil
+	return nil, used, nil
 }
 
 func rateLimitHeaders(h http.Header) map[string]string {

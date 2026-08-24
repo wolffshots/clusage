@@ -45,6 +45,11 @@ func TestRenderTabs(t *testing.T) {
 		FetchCron: "*/15 * * * *", HistoryHours: 168,
 	}, "/tmp/config.json", rs[len(rs)-1], true)
 	m.history = rs
+	m.tokens = seedTokenSamples(40)
+	for _, s := range m.tokens {
+		m.tokenTotal = m.tokenTotal.add(s.Used)
+	}
+	m.tokenCalls = len(m.tokens)
 
 	var mm tea.Model = m
 	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 96, Height: 32})

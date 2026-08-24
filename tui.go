@@ -19,10 +19,11 @@ type viewID int
 const (
 	viewNow viewID = iota
 	viewHistory
+	viewTokens
 	viewConfig
 )
 
-var tabNames = []string{"Now", "History", "Config"}
+var tabNames = []string{"Now", "History", "Tokens", "Config"}
 
 // cronCheckInterval is how often the model asks whether the schedule selects
 // the current minute. tea.Tick does not align to the clock, so a whole-minute
@@ -35,6 +36,7 @@ const fetchTimeout = 60 * time.Second
 type keyMap struct {
 	Now     key.Binding
 	History key.Binding
+	Tokens  key.Binding
 	Config  key.Binding
 
 	Refresh key.Binding
@@ -49,7 +51,8 @@ func newKeyMap() keyMap {
 	return keyMap{
 		Now:     key.NewBinding(key.WithKeys("1"), key.WithHelp("1", "now")),
 		History: key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "history")),
-		Config:  key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "config")),
+		Tokens:  key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "tokens")),
+		Config:  key.NewBinding(key.WithKeys("4"), key.WithHelp("4", "config")),
 		Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "fetch now")),
 		Auto:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "auto-fetch")),
 		Window:  key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "window")),
@@ -60,12 +63,12 @@ func newKeyMap() keyMap {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Now, k.History, k.Config, k.Refresh, k.Auto, k.Help, k.Quit}
+	return []key.Binding{k.Now, k.History, k.Tokens, k.Config, k.Refresh, k.Auto, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Now, k.History, k.Config},
+		{k.Now, k.History, k.Tokens, k.Config},
 		{k.Window, k.Span, k.Refresh, k.Auto},
 		{k.Help, k.Quit},
 	}
@@ -92,6 +95,11 @@ type fetchErrMsg struct {
 	auto bool
 }
 type historyMsg struct{ readings []Reading }
+type tokensMsg struct {
+	samples []TokenSample
+	total   tokenUse
+	calls   int
+}
 
 // cronTickMsg carries the sequence of the chain that armed it. A tick armed
 // before a pause/resume carries a stale sequence and is dropped, so repeated
@@ -124,6 +132,12 @@ type model struct {
 	history  []Reading
 	spanIdx  int
 	selected int // which window the history tab graphs
+
+	// tokens is what clusage spent on its own probe calls over the current
+	// span; tokenTotal and tokenCalls are all time, not span limited.
+	tokens     []TokenSample
+	tokenTotal tokenUse
+	tokenCalls int
 
 	err      error
 	lastAuto string // sticky "auto 14:15 ok" marker for the tab bar
@@ -159,7 +173,7 @@ func newModel(db *sql.DB, cfg Config, cfgPath string, latest Reading, hasData bo
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.historyCmd(), m.cronTick())
+	return tea.Batch(m.historyCmd(), m.tokensCmd(), m.cronTick())
 }
 
 // cronTick arms the next schedule check, or returns nil (a no-op in a Batch)
@@ -185,7 +199,7 @@ func fetchCmd(db *sql.DB, model string, auto bool) tea.Cmd {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 		defer cancel()
-		headers, err := fetchUsage(ctx, token, model)
+		headers, used, err := fetchUsage(ctx, token, model)
 		if err != nil {
 			return fetchErrMsg{err: err, auto: auto}
 		}
@@ -194,6 +208,9 @@ func fetchCmd(db *sql.DB, model string, auto bool) tea.Cmd {
 		}
 		r := Reading{FetchedAt: time.Now(), Model: model, Headers: headers}
 		if err := saveReading(db, r); err != nil {
+			return fetchErrMsg{err: err, auto: auto}
+		}
+		if err := saveTokens(db, TokenSample{CalledAt: r.FetchedAt, Model: model, Used: used}); err != nil {
 			return fetchErrMsg{err: err, auto: auto}
 		}
 		return fetchedMsg{r: r, auto: auto, at: r.FetchedAt}
@@ -208,6 +225,23 @@ func (m model) historyCmd() tea.Cmd {
 			return fetchErrMsg{err: err, auto: true} // a history read failure must not blank the body
 		}
 		return historyMsg{readings: rs}
+	}
+}
+
+// tokensCmd reads the probe call costs for the current span, plus the all-time
+// totals, off the UI goroutine.
+func (m model) tokensCmd() tea.Cmd {
+	db, span := m.db, m.historySpan()
+	return func() tea.Msg {
+		ss, err := tokensSince(db, time.Now().Add(-span))
+		if err != nil {
+			return fetchErrMsg{err: err, auto: true} // must not blank the body
+		}
+		total, calls, err := tokenTotals(db)
+		if err != nil {
+			return fetchErrMsg{err: err, auto: true}
+		}
+		return tokensMsg{samples: ss, total: total, calls: calls}
 	}
 }
 
@@ -241,7 +275,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.auto {
 			m.lastAuto = "auto " + msg.at.Local().Format("15:04") + " ✓"
 		}
-		return m, m.historyCmd()
+		return m, tea.Batch(m.historyCmd(), m.tokensCmd())
 
 	case fetchErrMsg:
 		m.fetching = false
@@ -259,6 +293,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if n := len(currentWindows(m)); m.selected >= n && n > 0 {
 			m.selected = 0
 		}
+		return m, nil
+
+	case tokensMsg:
+		m.tokens, m.tokenTotal, m.tokenCalls = msg.samples, msg.total, msg.calls
 		return m, nil
 
 	case cronTickMsg:
@@ -317,13 +355,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keys.Span):
 		m.spanIdx = (m.spanIdx + 1) % len(historySpans)
-		return m, m.historyCmd()
+		return m, tea.Batch(m.historyCmd(), m.tokensCmd())
 
 	case key.Matches(msg, m.keys.Now):
 		m.active = viewNow
 		return m, nil
 	case key.Matches(msg, m.keys.History):
 		m.active = viewHistory
+		return m, nil
+	case key.Matches(msg, m.keys.Tokens):
+		m.active = viewTokens
 		return m, nil
 	case key.Matches(msg, m.keys.Config):
 		m.active = viewConfig
@@ -358,6 +399,8 @@ func (m model) View() string {
 			body = m.nowView(bodyH)
 		case viewHistory:
 			body = m.historyView(bodyH)
+		case viewTokens:
+			body = m.tokensView(bodyH)
 		case viewConfig:
 			body = m.configView()
 		}

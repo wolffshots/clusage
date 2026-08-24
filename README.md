@@ -5,7 +5,7 @@ windows**. It shows how much of each limit you have used, when each one
 resets, and how the usage moved over the last hours or days.
 
 ```
-  Now    History    Config    cron 30 4,10,16 * * 1-4
+  Now    History    Tokens    Config    cron 30 4,10,16 * * 1-4
 
 ▸ 5h        █████████████████████████████████████████████████████████░░░░░  92%
     ● allowed_warning   resets Mon 19:19 (in 2h0m)
@@ -27,6 +27,10 @@ clusage makes the smallest possible inference call (one input token, one output
 token) and reads the headers off the response.
 
 Every reading goes into SQLite, which is what the history graphs draw from.
+
+Each probe call also reports what it cost, so clusage records its own token
+spend. The Tokens tab shows that spend, so the price of the monitoring is
+visible next to the limits it monitors.
 
 ## Install
 
@@ -114,11 +118,11 @@ the API. Press `r` for a fresh reading.
 
 | Key | Action |
 |---|---|
-| `1` `2` `3` | Now, History, Config tab |
+| `1` `2` `3` `4` | Now, History, Tokens, Config tab |
 | `r` | Fetch a reading now |
 | `a` | Pause or resume the scheduled fetch |
 | `tab` | Select the next limit window |
-| `s` | Cycle the history span (6h, 24h, 7d, 30d) |
+| `s` | Cycle the history and token span (6h, 24h, 7d, 30d) |
 | `?` | Toggle the full help |
 | `q` | Quit |
 
@@ -132,6 +136,17 @@ per window underneath for comparison. The scale is fixed at 0 to 100% rather
 than autoscaled, because a week that sat between 40% and 42% would otherwise
 render as a crisis.
 
+**Tokens** graphs what clusage spent on its own probe calls: a cumulative
+total over the chosen span, a per-call sparkline, and the breakdown into input,
+output, cache write and cache read. The all-time total is not limited by the
+span.
+
+The cache rows read 0 in normal use. Prompt caching needs a prefix of about
+1024 tokens, and a probe call is around 15 tokens, so nothing upstream will
+cache it. The rows are recorded anyway, because they come from the response
+`usage` block and cost nothing to keep. There is no cache header on the
+response; the body is the only place these counts appear.
+
 **Config** shows the effective settings, whether the schedule parses, and when
 the next scheduled fetch lands.
 
@@ -142,7 +157,7 @@ the next scheduled fetch lands.
 ```sh
 clusage usage             # uses the cached reading if it is fresh enough
 clusage usage -force      # ignore the cache and call the API
-clusage usage -verbose    # also print every rate limit header
+clusage usage -verbose    # also print every header and the token cost
 clusage usage -model claude-sonnet-5
 clusage usage -threshold 15
 ```
