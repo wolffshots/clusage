@@ -44,18 +44,50 @@ var (
 			BorderForeground(dim)
 )
 
+// loadBands are the utilization colour bands, lightest load first.
+var loadBands = [3]lipgloss.Style{positiveStyle, warnStyle, negativeStyle}
+
+// loadBand is the band a utilization fraction falls in: 0 under 60%, 1 under
+// 85%, 2 above. Chart code groups columns by band, which needs a comparable
+// value rather than a style.
+func loadBand(frac float64) int {
+	switch {
+	case frac >= 0.85:
+		return 2
+	case frac >= 0.60:
+		return 1
+	default:
+		return 0
+	}
+}
+
 // loadStyle colours a utilization fraction green under 60%, amber under 85%,
 // red above. The same thresholds drive the gauges and the history lines so a
 // colour means one thing across the whole UI.
-func loadStyle(frac float64) lipgloss.Style {
-	switch {
-	case frac >= 0.85:
-		return negativeStyle
-	case frac >= 0.60:
-		return warnStyle
-	default:
-		return positiveStyle
+func loadStyle(frac float64) lipgloss.Style { return loadBands[loadBand(frac)] }
+
+// colorCols paints a chart row one column at a time, so every bar carries the
+// colour of the value it shows. Colouring the whole chart by the newest reading
+// hid the history: a run that climbed from 5% to 95% came out all red.
+// Neighbouring columns in the same band share one escape sequence.
+func colorCols(row string, cols []float64) string {
+	runes := []rune(row)
+	band := func(i int) int {
+		if i >= len(cols) {
+			return 0
+		}
+		return loadBand(cols[i])
 	}
+	var b strings.Builder
+	for i := 0; i < len(runes); {
+		j := i + 1
+		for j < len(runes) && band(j) == band(i) {
+			j++
+		}
+		b.WriteString(loadBands[band(i)].Render(string(runes[i:j])))
+		i = j
+	}
+	return b.String()
 }
 
 // contentWidth is the usable width for a chart, leaving room for the y-axis
@@ -175,7 +207,7 @@ func (m model) historyView(height int) string {
 	// Fixed 0..100% scale rather than min/max: the absolute distance to the
 	// limit is the point of this graph, so an autoscaled 40-to-42% band would
 	// read as a crisis.
-	rows := areaChart(series, chartW, chartH, 0, 1)
+	rows, cols := areaChart(series, chartW, chartH, 0, 1)
 	for i, row := range rows {
 		axis := ""
 		switch i {
@@ -186,7 +218,7 @@ func (m model) historyView(height int) string {
 		case len(rows) / 2:
 			axis = " 50%"
 		}
-		b.WriteString(dimStyle.Render(padLeft(axis, 4)) + " " + style.Render(row) + "\n")
+		b.WriteString(dimStyle.Render(padLeft(axis, 4)) + " " + colorCols(row, cols) + "\n")
 	}
 	b.WriteString(strings.Repeat(" ", 5) + dimStyle.Render(xAxis(stamps, chartW)) + "\n\n")
 
@@ -200,7 +232,8 @@ func (m model) historyView(height int) string {
 		s, _ := utilSeries(m.history, w.Name)
 		line := dimStyle.Render("(no data)")
 		if len(s) > 0 {
-			line = loadStyle(s[len(s)-1]).Render(sparkline(s, chartW))
+			glyphs, vals := sparkline(s, chartW)
+			line = colorCols(glyphs, vals)
 		}
 		name := padRight(w.Name, 10)
 		if w.Name == sel.Name {
@@ -273,7 +306,9 @@ func (m model) tokensView(height int) string {
 	chartH := clamp(height-15, 3, 14)
 
 	top := cum[len(cum)-1]
-	rows := areaChart(cum, chartW, chartH, 0, top)
+	// Spend has no limit to sit under, so the token chart stays one colour;
+	// there is no band for a column to fall in.
+	rows, _ := areaChart(cum, chartW, chartH, 0, top)
 	for i, row := range rows {
 		axis := ""
 		switch i {
@@ -286,8 +321,9 @@ func (m model) tokensView(height int) string {
 	}
 	b.WriteString(strings.Repeat(" ", 7) + dimStyle.Render(xAxis(stamps, chartW)) + "\n\n")
 
+	perGlyphs, _ := sparkline(per, chartW)
 	b.WriteString("  " + labelStyle.Render(padRight("per call", 12)) +
-		valueStyle.Render(sparkline(per, chartW)) + "\n\n")
+		valueStyle.Render(perGlyphs) + "\n\n")
 
 	var spanTotal tokenUse
 	for _, s := range m.tokens {

@@ -9,10 +9,11 @@ var sparkLevels = []rune("▁▂▃▄▅▆▇█")
 
 // sparkline renders values as block glyphs scaled between the series min and
 // max. If there are more values than width, they are sampled down to width
-// points; fewer values render as-is.
-func sparkline(values []float64, width int) string {
+// points; fewer values render as-is. The second return is the value behind each
+// glyph, so the caller can color a glyph by its own value.
+func sparkline(values []float64, width int) (string, []float64) {
 	if len(values) == 0 || width <= 0 {
-		return ""
+		return "", nil
 	}
 	pts := resample(values, width)
 	min, max := bounds(pts)
@@ -25,24 +26,29 @@ func sparkline(values []float64, width int) string {
 		}
 		b.WriteRune(sparkLevels[clamp(level, 0, len(sparkLevels)-1)])
 	}
-	return b.String()
+	return b.String(), pts
 }
 
 // areaChart renders values as a filled column chart height rows tall, scaled
 // between lo and hi. Row 0 of the returned slice is the top row, so the caller
 // can join them with the y-axis labels in the same order.
-func areaChart(values []float64, width, height int, lo, hi float64) []string {
+//
+// The second return is the value each column shows, one entry per column and
+// aligned with the runes in every row. It lets the caller color a column by its
+// own value instead of painting the whole chart one color.
+func areaChart(values []float64, width, height int, lo, hi float64) ([]string, []float64) {
 	if width <= 0 || height <= 0 {
-		return nil
+		return nil, nil
 	}
 	rows := make([]string, height)
 	if len(values) == 0 {
 		for i := range rows {
 			rows[i] = strings.Repeat(" ", width)
 		}
-		return rows
+		return rows, make([]float64, width)
 	}
 	pts := resample(values, width)
+	pad := clamp(width-len(pts), 0, width)
 	span := hi - lo
 	if span <= 0 {
 		span = 1
@@ -66,9 +72,11 @@ func areaChart(values []float64, width, height int, lo, hi float64) []string {
 		}
 		// Left-pad the resampled series so a short history hugs the right edge,
 		// keeping "now" in the same column as the axis regardless of point count.
-		rows[r] = strings.Repeat(" ", clamp(width-len(pts), 0, width)) + b.String()
+		rows[r] = strings.Repeat(" ", pad) + b.String()
 	}
-	return rows
+	// The pad columns are blank, so their value never shows; zero keeps the
+	// slice the same length as the rows.
+	return rows, append(make([]float64, pad), pts...)
 }
 
 // gauge renders a proportional bar, e.g. "████████░░░░░░░░". frac is clamped to
