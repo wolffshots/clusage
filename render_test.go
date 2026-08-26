@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -64,5 +65,36 @@ func TestRenderTabs(t *testing.T) {
 		if !strings.Contains(out, "cron") {
 			t.Errorf("%s view lost the cron marker from the tab bar", name)
 		}
+	}
+}
+
+// TestFetchErrorKeepsTabsReachable checks that a failed fetch reports itself
+// without hiding the last good reading. An exhausted limit used to blank every
+// tab, which removed the numbers the user needed to see.
+func TestFetchErrorKeepsTabsReachable(t *testing.T) {
+	rs := seedReadings(40)
+	m := newModel(nil, Config{Model: "claude-opus-5", FetchCron: "*/15 * * * *"},
+		"/tmp/config.json", rs[len(rs)-1], true)
+	m.history = rs
+
+	var mm tea.Model = m
+	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 96, Height: 32})
+	mm, _ = mm.Update(fetchErrMsg{err: errors.New("429 rate limit exceeded")})
+
+	out := mm.View()
+	t.Logf("\n===== Now with a failed fetch =====\n%s", out)
+	if !strings.Contains(out, "429 rate limit exceeded") {
+		t.Error("the failure is not reported")
+	}
+	if !strings.Contains(out, "92%") {
+		t.Error("the last good reading was hidden by the failure")
+	}
+	if got := strings.Count(out, "\n") + 1; got > 32 {
+		t.Errorf("view is %d lines, taller than the 32-row terminal", got)
+	}
+	// The banner must not survive a good fetch.
+	mm, _ = mm.Update(fetchedMsg{r: rs[len(rs)-1], at: rs[len(rs)-1].FetchedAt})
+	if strings.Contains(mm.View(), "429 rate limit exceeded") {
+		t.Error("the banner outlived the failure")
 	}
 }

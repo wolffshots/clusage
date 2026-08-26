@@ -384,16 +384,28 @@ func (m model) View() string {
 	}
 	top := m.renderTabs()
 	bottom := footerStyle.Width(m.width).Render(m.help.View(m.keys))
+
+	// A failure is a banner above the tab, not a replacement for it. The last
+	// good reading is the reason to keep the tabs reachable while the API is
+	// refusing calls.
+	banner := ""
+	if m.err != nil {
+		banner = lipgloss.NewStyle().Width(m.width).Render(
+			errorStyle.Render("fetch failed: ") + m.err.Error())
+	}
+
 	bodyH := m.height - lipgloss.Height(top) - lipgloss.Height(bottom) - 1
+	if banner != "" {
+		bodyH -= lipgloss.Height(banner) + 1
+	}
 	if bodyH < 3 {
 		bodyH = 3
 	}
 
 	var body string
 	switch {
-	case m.err != nil:
-		body = errorStyle.Render("fetch failed: ") + m.err.Error() +
-			"\n\n" + dimStyle.Render("press r to retry")
+	case !m.hasData && m.err != nil:
+		body = dimStyle.Render("press r to retry")
 	case !m.hasData && m.fetching:
 		body = m.spin.View() + " fetching usage…"
 	case !m.hasData:
@@ -410,7 +422,13 @@ func (m model) View() string {
 			body = m.configView()
 		}
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, top, body, bottom)
+
+	parts := []string{top}
+	if banner != "" {
+		parts = append(parts, banner, "")
+	}
+	parts = append(parts, body, bottom)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 func (m model) renderTabs() string {
