@@ -54,10 +54,17 @@ func (u tokenUse) add(v tokenUse) tokenUse {
 // limit headers plus what the call itself cost in tokens. The token counts are
 // zero when the API rejected the call, because a rejected call carries the
 // headers but no usage block.
+//
+// Retries are off. The SDK honors the retry-after header, which on an
+// exhausted limit is the whole time left in the window. That sleep outlives
+// the fetch timeout, so the context expires and the response, headers and all,
+// is thrown away. One attempt keeps the rejected response, which carries the
+// numbers this tool exists to show.
 func fetchUsage(ctx context.Context, token, model string) (map[string]string, tokenUse, error) {
 	client := anthropic.NewClient(
 		option.WithAuthToken(token),
 		option.WithHeader("anthropic-beta", "oauth-2025-04-20"),
+		option.WithMaxRetries(0),
 	)
 	var raw *http.Response
 	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{

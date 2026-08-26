@@ -210,8 +210,13 @@ func fetchCmd(db *sql.DB, model string, auto bool) tea.Cmd {
 		if err := saveReading(db, r); err != nil {
 			return fetchErrMsg{err: err, auto: auto}
 		}
-		if err := saveTokens(db, TokenSample{CalledAt: r.FetchedAt, Model: model, Used: used}); err != nil {
-			return fetchErrMsg{err: err, auto: auto}
+		// A rejected call bills nothing, so it has no usage block. Recording a
+		// zero sample would add a flat point to the token chart and count a
+		// call that cost nothing.
+		if used.total() > 0 {
+			if err := saveTokens(db, TokenSample{CalledAt: r.FetchedAt, Model: model, Used: used}); err != nil {
+				return fetchErrMsg{err: err, auto: auto}
+			}
 		}
 		return fetchedMsg{r: r, auto: auto, at: r.FetchedAt}
 	}
