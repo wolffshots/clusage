@@ -172,10 +172,27 @@ numbers as `clusage usage` and acts on them before each tool call:
 
 | Condition | Action |
 |---|---|
+| A 5h or 7d window is exhausted | Deny the call at once. Overage is paying, so a retry only spends more. |
 | 5h window at or above 90% | Pause the tool call. Poll every 15s. Release the call once the window drops below 90%. |
-| 5h window still high after 45s | Deny the call, and tell the agent to stop and report. |
+| 5h window still high after 45s | Deny the call, and tell the agent when to retry. |
 | Any 7d window at or above 95% | Deny the call at once. No polling. |
+| The tool is a scheduling tool | Allow the call, so the agent can book its retry. |
 | `clusage` missing or failing | Allow the call. |
+
+A deny names the window, its percent, and its reset clock time. It then tells
+the agent to set a timer or a wake-up for that time and to retry then, without
+running `clusage` again to check. Where the window reports no reset time, the
+deny tells the agent to stop and report to the user instead.
+
+The exhausted case is different. A window that reports a status other than
+`allowed` has spent its quota, so the next call comes out of overage. The guard
+denies at once, with no wait and no retry advice, because waiting does not help
+and a retry costs real money. Set `CLUSAGE_GUARD_ALLOW_OVERAGE=1` to opt in to
+working on overage.
+
+The guard reads the `PreToolUse` event on stdin and lets the scheduling tools
+through, so a denied agent can still book the retry it was just told to make.
+`CLUSAGE_GUARD_ALLOW_TOOLS` holds that list.
 
 The hook runs in front of every agent and subagent, so one session cannot talk
 its way past the limit. A pause is a sleep inside the hook, so the agent spends
@@ -221,6 +238,22 @@ Every threshold is an environment variable, so no config file is needed:
 | `CLUSAGE_GUARD_INTERVAL` | `360` | Seconds between checks while under the soft threshold. |
 | `CLUSAGE_GUARD_POLL` | `15` | Seconds between checks while paused. |
 | `CLUSAGE_GUARD_MAXWAIT` | `45` | Deny after pausing this long. |
+| `CLUSAGE_GUARD_ALLOW_OVERAGE` | `0` | Set to `1` to keep working once a window is exhausted. |
+| `CLUSAGE_GUARD_ALLOW_TOOLS` | `ScheduleWakeup CronCreate` | Tool names that pass without a check. |
+
+### The off switch
+
+The guard also stops if `~/.claude/clusage-guard.off` exists:
+
+```sh
+touch ~/.claude/clusage-guard.off    # guard off
+rm ~/.claude/clusage-guard.off       # guard on again
+```
+
+`CLUSAGE_GUARD_DISABLE` cannot help here. The desktop app gives no way to set
+an environment variable for one session, so a tripped guard would deny every
+tool call, including the calls needed to fix the guard. A file works from
+inside the session. `clusage hook status` reports the switch when it is there.
 
 Keep `CLUSAGE_GUARD_MAXWAIT` under the hook timeout in `settings.json`. Install
 sets that timeout 15 seconds above the maximum wait. A hook that times out lets

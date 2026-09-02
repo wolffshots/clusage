@@ -7,11 +7,16 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 pass=0 fail=0
 
-run() { # run <fixture-text> <expect: allow|deny> <expect-substring>
+run() { # run <fixture-text> <expect: allow|deny> <expect-substring> [stdin-json]
   printf '%s\n' "$1" > "$TMP/fx"
   rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
-  out=$(CLUSAGE_GUARD_FIXTURE="$TMP/fx" CLUSAGE_GUARD_POLL=1 CLUSAGE_GUARD_MAXWAIT=2 \
-        bash "$GUARD" </dev/null 2>/dev/null)
+  if [[ -n "${4:-}" ]]; then
+    out=$(printf '%s' "$4" | CLUSAGE_GUARD_FIXTURE="$TMP/fx" CLUSAGE_GUARD_POLL=1 \
+          CLUSAGE_GUARD_MAXWAIT=2 bash "$GUARD" 2>/dev/null)
+  else
+    out=$(CLUSAGE_GUARD_FIXTURE="$TMP/fx" CLUSAGE_GUARD_POLL=1 CLUSAGE_GUARD_MAXWAIT=2 \
+          bash "$GUARD" </dev/null 2>/dev/null)
+  fi
   if [[ "$2" == allow ]]; then
     [[ -z "$out" ]] && { pass=$((pass+1)); return; }
   else
@@ -50,6 +55,42 @@ run "$edge" deny "7d limit is at 95%"
 soft_edge="5h  90% used  allowed
 7d  20% used  allowed"
 run "$soft_edge" deny "5h limit is at 90%"
+
+# a deny names the reset clock time and tells the caller to wait for it
+run "$high5" deny "It resets Wed 19:30 (in 4h36m). Set a timer"
+# a window with no reset leaves nothing to wait for
+run "$high7" deny "reported no reset time"
+
+# an exhausted window means overage pays for the call, so stop at once
+burned="5h  100% used  rejected  resets Wed 19:30 (in 4h36m)
+7d  60% used  allowed
+overage 12% used allowed"
+run "$burned" deny "5h window is exhausted (status rejected)"
+
+# opting in drops back to the ordinary soft threshold path
+printf '%s\n' "$burned" > "$TMP/fx"
+rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+out=$(CLUSAGE_GUARD_ALLOW_OVERAGE=1 CLUSAGE_GUARD_FIXTURE="$TMP/fx" CLUSAGE_GUARD_POLL=1 \
+      CLUSAGE_GUARD_MAXWAIT=2 bash "$GUARD" </dev/null 2>/dev/null)
+[[ "$out" == *"5h limit is at 100% and did not drop"* ]] \
+  && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: overage opt-in, got: ${out:-<empty>}"; }
+
+# a scheduling tool passes a tripped window, so the agent can book the retry
+run "$high7" allow "" '{"hook_event_name":"PreToolUse","tool_name":"ScheduleWakeup","tool_input":{}}'
+run "$high7" deny "7d limit is at 96%" '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}'
+
+# the off switch short circuits before any check
+off="$TMP/off"
+mkdir -p "$off"
+: > "$off/clusage-guard.off"
+printf '%s\n' "$high7" > "$TMP/fx"
+rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+out=$(CLAUDE_CONFIG_DIR="$off" CLUSAGE_GUARD_FIXTURE="$TMP/fx" bash "$GUARD" </dev/null 2>/dev/null)
+[[ -z "$out" ]] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: off switch, got: $out"; }
+out=$(CLAUDE_CONFIG_DIR="$off" bash "$GUARD" --status 2>/dev/null)
+[[ "$out" == *"off switch present"* ]] \
+  && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: --status did not report the off switch"; }
+rm -rf "$off"
 
 # resume path: paused at 84%, drops to 33% while polling
 printf '%s\n' "$high5" > "$TMP/fx"
