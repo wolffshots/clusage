@@ -172,14 +172,21 @@ numbers as `clusage usage` and acts on them before each tool call:
 
 | Condition | Action |
 |---|---|
-| 5h window at or above 80% | Pause the tool call. Poll every 60s. Release the call once the window drops below 80%. |
-| 5h window still high after 55 minutes | Deny the call, and tell the agent to stop and report. |
+| 5h window at or above 90% | Pause the tool call. Poll every 15s. Release the call once the window drops below 90%. |
+| 5h window still high after 45s | Deny the call, and tell the agent to stop and report. |
 | Any 7d window at or above 95% | Deny the call at once. No polling. |
 | `clusage` missing or failing | Allow the call. |
 
 The hook runs in front of every agent and subagent, so one session cannot talk
 its way past the limit. A pause is a sleep inside the hook, so the agent spends
 no tokens while it waits.
+
+Keep that pause short. Claude Code decides a session is dead when a hook blocks
+for minutes, and kills it with "the session stopped responding". So the hook
+waits out a short spike, then denies the call and hands the decision back. The
+next message the user sends is checked again, and work continues once the
+window drops. Raise `CLUSAGE_GUARD_MAXWAIT` only if a longer block is safe on
+your client.
 
 ```sh
 clusage hook install      # register it in ~/.claude/settings.json
@@ -209,15 +216,18 @@ Every threshold is an environment variable, so no config file is needed:
 | Variable | Default | Meaning |
 |---|---|---|
 | `CLUSAGE_GUARD_DISABLE` | `0` | Set to `1` to turn the guard off. |
-| `CLUSAGE_GUARD_5H` | `80` | Soft threshold, percent. Pause and poll. |
+| `CLUSAGE_GUARD_5H` | `90` | Soft threshold, percent. Pause and poll. |
 | `CLUSAGE_GUARD_7D` | `95` | Hard threshold, percent. Deny without polling. |
 | `CLUSAGE_GUARD_INTERVAL` | `360` | Seconds between checks while under the soft threshold. |
-| `CLUSAGE_GUARD_POLL` | `60` | Seconds between checks while paused. |
-| `CLUSAGE_GUARD_MAXWAIT` | `3300` | Deny after pausing this long. |
+| `CLUSAGE_GUARD_POLL` | `15` | Seconds between checks while paused. |
+| `CLUSAGE_GUARD_MAXWAIT` | `45` | Deny after pausing this long. |
 
 Keep `CLUSAGE_GUARD_MAXWAIT` under the hook timeout in `settings.json`. Install
-sets that timeout 100 seconds above the maximum wait. A hook that times out
-lets the tool call through.
+sets that timeout 15 seconds above the maximum wait. A hook that times out lets
+the tool call through.
+
+A poll reads a new probe every time, so a pause costs one small API call per
+`CLUSAGE_GUARD_POLL` seconds.
 
 ## Config
 

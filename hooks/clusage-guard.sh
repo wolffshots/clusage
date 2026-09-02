@@ -12,19 +12,21 @@
 #
 # Config (environment):
 #   CLUSAGE_GUARD_DISABLE=1     turn the guard off
-#   CLUSAGE_GUARD_5H=80         soft threshold, percent, pause and poll
+#   CLUSAGE_GUARD_5H=90         soft threshold, percent, pause and poll
 #   CLUSAGE_GUARD_7D=95         hard threshold, percent, deny without polling
 #   CLUSAGE_GUARD_INTERVAL=360  seconds between checks while under threshold
-#   CLUSAGE_GUARD_POLL=60       seconds between checks while paused
-#   CLUSAGE_GUARD_MAXWAIT=3300  deny after pausing this long
+#   CLUSAGE_GUARD_POLL=15       seconds between checks while paused
+#   CLUSAGE_GUARD_MAXWAIT=45    deny after pausing this long
 #   CLUSAGE_GUARD_FIXTURE=path  read usage text from a file instead of clusage
 set -uo pipefail
 
-SOFT=${CLUSAGE_GUARD_5H:-80}
+SOFT=${CLUSAGE_GUARD_5H:-90}
 HARD=${CLUSAGE_GUARD_7D:-95}
 INTERVAL=${CLUSAGE_GUARD_INTERVAL:-360}
-POLL=${CLUSAGE_GUARD_POLL:-60}
-MAXWAIT=${CLUSAGE_GUARD_MAXWAIT:-3300}
+POLL=${CLUSAGE_GUARD_POLL:-15}
+# A hook that blocks for minutes makes the Claude Code session look dead, and
+# the app kills it. Wait only for a short spike, then hand the decision back.
+MAXWAIT=${CLUSAGE_GUARD_MAXWAIT:-45}
 STATE="${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
 # Absolute, but deliberately unresolved. The caller may name this script
 # through a stable path such as <brew prefix>/share/clusage/hooks, and
@@ -62,7 +64,7 @@ manage() {
     echo "clusage-guard: python3 is needed to edit settings.json" >&2
     return 1
   }
-  python3 - "$1" "$CLAUDE_DIR/settings.json" "$LINK" "$((MAXWAIT + 100))" <<'PY'
+  python3 - "$1" "$CLAUDE_DIR/settings.json" "$LINK" "$((MAXWAIT + 15))" <<'PY'
 import collections, json, os, sys
 
 mode, path, script, timeout = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
@@ -188,7 +190,7 @@ if [[ "$verdict" == "SOFT" ]]; then
   while (( waited < MAXWAIT )); do
     sleep "$POLL"
     waited=$(( waited + POLL ))
-    read -r verdict value <<<"$(check 1)"
+    read -r verdict value <<<"$(check 0)"
     if [[ "$verdict" == "HARD" ]]; then
       deny "clusage guard rail: the 7d limit is at ${value}% (hard cut at ${HARD}%). Stop all work now, in this agent and in every subagent. Do not retry."
     fi
@@ -198,7 +200,7 @@ if [[ "$verdict" == "SOFT" ]]; then
       exit 0
     fi
   done
-  deny "clusage guard rail: the 5h limit has been at or above ${SOFT}% for ${MAXWAIT}s (now ${value}%). Pause the work, tell the user the session is throttled, and end the turn without retrying."
+  deny "clusage guard rail: the 5h limit is at ${value}% and did not drop in ${MAXWAIT}s (soft limit ${SOFT}%). Stop all work now, in this agent and in every subagent. Do not retry. Tell the user the session is throttled and end the turn. The next message they send is checked again, and work continues once the window drops."
 fi
 
 date +%s > "$STATE"

@@ -25,9 +25,14 @@ low="5h  33% used  allowed  resets Wed 19:30 (in 4h36m)
 overage 78% used allowed_warning"
 run "$low" allow
 
-high5="5h  84% used  allowed_warning  resets Wed 19:30 (in 4h36m)
+high5="5h  94% used  allowed_warning  resets Wed 19:30 (in 4h36m)
 7d  20% used  allowed"
-run "$high5" deny "5h limit has been at or above 80%"
+run "$high5" deny "5h limit is at 94% and did not drop"
+
+# just under the soft default, so the call goes through
+near="5h  89% used  allowed_warning
+7d  20% used  allowed"
+run "$near" allow
 
 high7="5h  33% used  allowed
 7d  96% used  allowed_warning"
@@ -38,9 +43,13 @@ opus="5h  10% used  allowed
 7d-opus  97% used  allowed_warning"
 run "$opus" deny "7d limit is at 97%"
 
-edge="5h  80% used  allowed
+edge="5h  90% used  allowed
 7d  95% used  allowed"
 run "$edge" deny "7d limit is at 95%"
+
+soft_edge="5h  90% used  allowed
+7d  20% used  allowed"
+run "$soft_edge" deny "5h limit is at 90%"
 
 # resume path: paused at 84%, drops to 33% while polling
 printf '%s\n' "$high5" > "$TMP/fx"
