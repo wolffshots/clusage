@@ -97,6 +97,8 @@ bash "$TMP/stable/hooks/clusage-guard.sh" --install >/dev/null
 [[ "$(readlink "$cfg/hooks/clusage-guard.sh")" == "$TMP/stable/hooks/clusage-guard.sh" ]] \
   && pass=$((pass+1)) \
   || { fail=$((fail+1)); echo "FAIL: link resolved past the stable path, got $(readlink "$cfg/hooks/clusage-guard.sh")"; }
+bash "$TMP/stable/hooks/clusage-guard.sh" --status | grep -q "stable/hooks/clusage-guard.sh$" \
+  && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: status resolved past the link target"; }
 bash "$GUARD" --uninstall >/dev/null
 unset CLAUDE_CONFIG_DIR
 

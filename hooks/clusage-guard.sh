@@ -85,7 +85,14 @@ if mode == "status":
         for hook in entry["hooks"]:
             print("registered:", hook["command"], "(timeout %ss)" % hook.get("timeout", 60))
     if os.path.islink(script):
-        print("link:", script, "->", os.path.realpath(script))
+        # The immediate target, not the fully resolved path. Homebrew points
+        # <prefix>/share/clusage at the installed version, and resolving that
+        # last hop would read as if the link named a version.
+        target = os.readlink(script)
+        print("link:", script, "->", target)
+        if "/Cellar/" in target:
+            print("warning: that target dies on the next upgrade,",
+                  "rerun `clusage hook install`")
     if not os.path.exists(script):
         print("broken: nothing at", script)
         sys.exit(1)
