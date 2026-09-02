@@ -23,6 +23,9 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Test the guard rail hook
+        run: bash hooks/clusage-guard.test.sh
+
       - name: Build artifacts
         env:
           VERSION: ${{ github.ref_name }}
