@@ -165,6 +165,60 @@ clusage usage -threshold 15
 Flag defaults come from `config.json`, so a flag is only needed to override the
 configured value for one run.
 
+## Guard rail hook
+
+`hooks/clusage-guard.sh` is a Claude Code `PreToolUse` hook. It reads the same
+numbers as `clusage usage` and acts on them before each tool call:
+
+| Condition | Action |
+|---|---|
+| 5h window at or above 80% | Pause the tool call. Poll every 60s. Release the call once the window drops below 80%. |
+| 5h window still high after 55 minutes | Deny the call, and tell the agent to stop and report. |
+| Any 7d window at or above 95% | Deny the call at once. No polling. |
+| `clusage` missing or failing | Allow the call. |
+
+The hook runs in front of every agent and subagent, so one session cannot talk
+its way past the limit. A pause is a sleep inside the hook, so the agent spends
+no tokens while it waits.
+
+```sh
+clusage hook install      # register it in ~/.claude/settings.json
+clusage hook status       # show the registered command and timeout
+clusage hook uninstall    # remove it again
+```
+
+Install does two things. It links the script that ships with this build into
+`~/.claude/hooks/clusage-guard.sh`, and it writes one `PreToolUse` entry naming
+that link. The rest of `settings.json` stays as it is.
+
+The registered path is therefore the same on every machine, whatever the
+install prefix is. A `brew upgrade` replaces the script the link points at, so
+the hook upgrades with clusage and needs no further step. `clusage hook status`
+prints the link and its target, and reports a broken link.
+
+Install refuses to overwrite a real file at the link path. Uninstall removes the
+entry and the link, and never a real file. Set `CLAUDE_CONFIG_DIR` to work on a
+different settings file.
+
+Checks are at most one per 6 minutes, and a cached check costs about 20ms.
+
+### Guard rail settings
+
+Every threshold is an environment variable, so no config file is needed:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CLUSAGE_GUARD_DISABLE` | `0` | Set to `1` to turn the guard off. |
+| `CLUSAGE_GUARD_5H` | `80` | Soft threshold, percent. Pause and poll. |
+| `CLUSAGE_GUARD_7D` | `95` | Hard threshold, percent. Deny without polling. |
+| `CLUSAGE_GUARD_INTERVAL` | `360` | Seconds between checks while under the soft threshold. |
+| `CLUSAGE_GUARD_POLL` | `60` | Seconds between checks while paused. |
+| `CLUSAGE_GUARD_MAXWAIT` | `3300` | Deny after pausing this long. |
+
+Keep `CLUSAGE_GUARD_MAXWAIT` under the hook timeout in `settings.json`. Install
+sets that timeout 100 seconds above the maximum wait. A hook that times out
+lets the tool call through.
+
 ## Config
 
 Clusage writes `config.json` on first run, at `~/.config/clusage/config.json`
@@ -231,6 +285,7 @@ the wrong time. The Config tab flags it in red.
 ```sh
 go test ./...     # unit tests, plus a full render of every tab at 96x32
 go vet ./...
+bash hooks/clusage-guard.test.sh   # guard rail decisions and registration
 ```
 
 `TestRenderTabs` drives the model through `Update` and logs each tab, so
