@@ -6,17 +6,38 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // hookScriptName is installed next to the binary by the package manager, and
 // lives in the repo root during development.
 const hookScriptName = "clusage-guard.sh"
 
+// brewPrefixPath rewrites a path inside a Homebrew Cellar to the same path
+// under the prefix, and returns "" for anything else:
+//
+//	/opt/homebrew/Cellar/clusage/0.4.1/share/clusage/hooks/guard.sh
+//	-> /opt/homebrew/share/clusage/hooks/guard.sh
+//
+// Homebrew repoints <prefix>/share/clusage on every upgrade, so that path
+// stays valid while the Cellar path dies with the version.
+func brewPrefixPath(p string) string {
+	const marker = "/Cellar/"
+	i := strings.Index(p, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := strings.Split(p[i+len(marker):], "/")
+	if len(rest) < 3 { // formula name, version, then the path itself
+		return ""
+	}
+	return filepath.Join(p[:i], filepath.Join(rest[2:]...))
+}
+
 // hookCandidates lists where the guard rail script may sit, best first, for a
-// binary at exe. The unresolved path comes first on purpose: Homebrew links
-// <prefix>/share/clusage at the current version, and that link survives an
-// upgrade. The resolved path points into a versioned directory that an upgrade
-// deletes, so it is only a fallback.
+// binary at exe. A prefix path comes before the Cellar path it was derived
+// from, so a link made to it survives an upgrade. macOS reports the resolved
+// image path in os.Executable, so the rewrite above does the real work here.
 func hookCandidates(exe string) []string {
 	var out []string
 	seen := map[string]bool{}
@@ -31,8 +52,13 @@ func hookCandidates(exe string) []string {
 			continue
 		}
 		prefix := filepath.Dir(filepath.Dir(p))
-		add(filepath.Join(prefix, "share", "clusage", "hooks", hookScriptName))
-		add(filepath.Join(filepath.Dir(p), "hooks", hookScriptName))
+		for _, c := range []string{
+			filepath.Join(prefix, "share", "clusage", "hooks", hookScriptName),
+			filepath.Join(filepath.Dir(p), "hooks", hookScriptName),
+		} {
+			add(brewPrefixPath(c))
+			add(c)
+		}
 	}
 	add(filepath.Join("hooks", hookScriptName))
 	return out

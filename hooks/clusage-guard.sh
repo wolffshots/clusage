@@ -26,7 +26,11 @@ INTERVAL=${CLUSAGE_GUARD_INTERVAL:-360}
 POLL=${CLUSAGE_GUARD_POLL:-60}
 MAXWAIT=${CLUSAGE_GUARD_MAXWAIT:-3300}
 STATE="${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
-SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
+# Absolute, but deliberately unresolved. The caller may name this script
+# through a stable path such as <brew prefix>/share/clusage/hooks, and
+# resolving it would bury a version number in the link that --install makes.
+SELF=${BASH_SOURCE[0]}
+[[ "$SELF" != /* ]] && SELF="$PWD/$SELF"
 CLAUDE_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 LINK="$CLAUDE_DIR/hooks/clusage-guard.sh"
 

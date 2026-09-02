@@ -80,3 +80,25 @@ func TestHookCandidatesFallBackToTheResolvedPath(t *testing.T) {
 	}
 	t.Fatalf("hookCandidates(%q) = %v, missing %q", link, got, want)
 }
+
+func TestBrewPrefixPath(t *testing.T) {
+	cases := map[string]string{
+		"/opt/homebrew/Cellar/clusage/0.4.1/share/clusage/hooks/g.sh": "/opt/homebrew/share/clusage/hooks/g.sh",
+		"/usr/local/Cellar/clusage/1.2.3/share/clusage/hooks/g.sh":    "/usr/local/share/clusage/hooks/g.sh",
+		"/opt/homebrew/share/clusage/hooks/g.sh":                      "",
+		"/Cellar/clusage/0.4.1":                                       "",
+	}
+	for in, want := range cases {
+		if got := brewPrefixPath(in); got != want {
+			t.Errorf("brewPrefixPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestHookCandidatesPreferThePrefixOverTheCellar(t *testing.T) {
+	got := hookCandidates("/opt/homebrew/Cellar/clusage/0.4.1/bin/clusage")
+	want := "/opt/homebrew/share/clusage/hooks/" + hookScriptName
+	if got[0] != want {
+		t.Fatalf("hookCandidates()[0] = %q, want %q (all: %v)", got[0], want, got)
+	}
+}

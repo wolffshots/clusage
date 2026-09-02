@@ -88,6 +88,16 @@ bash "$GUARD" --install >/dev/null 2>&1 \
   || { [[ "$(cat "$cfg/hooks/clusage-guard.sh")" == mine ]] && pass=$((pass+1)) \
        || { fail=$((fail+1)); echo "FAIL: real file was overwritten"; }; }
 rm -f "$cfg/hooks/clusage-guard.sh"
+
+# install links to the path it was called by, not to the resolved path
+mkdir -p "$TMP/versioned/hooks"
+cp "$GUARD_ABS" "$TMP/versioned/hooks/clusage-guard.sh"
+ln -s "$TMP/versioned" "$TMP/stable"
+bash "$TMP/stable/hooks/clusage-guard.sh" --install >/dev/null
+[[ "$(readlink "$cfg/hooks/clusage-guard.sh")" == "$TMP/stable/hooks/clusage-guard.sh" ]] \
+  && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: link resolved past the stable path, got $(readlink "$cfg/hooks/clusage-guard.sh")"; }
+bash "$GUARD" --uninstall >/dev/null
 unset CLAUDE_CONFIG_DIR
 
 echo "pass=$pass fail=$fail"
