@@ -12,23 +12,52 @@ import (
 // lives in the repo root during development.
 const hookScriptName = "clusage-guard.sh"
 
+// hookCandidates lists where the guard rail script may sit, best first, for a
+// binary at exe. The unresolved path comes first on purpose: Homebrew links
+// <prefix>/share/clusage at the current version, and that link survives an
+// upgrade. The resolved path points into a versioned directory that an upgrade
+// deletes, so it is only a fallback.
+func hookCandidates(exe string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for _, p := range []string{exe, resolve(exe)} {
+		if p == "" {
+			continue
+		}
+		prefix := filepath.Dir(filepath.Dir(p))
+		add(filepath.Join(prefix, "share", "clusage", "hooks", hookScriptName))
+		add(filepath.Join(filepath.Dir(p), "hooks", hookScriptName))
+	}
+	add(filepath.Join("hooks", hookScriptName))
+	return out
+}
+
+// resolve follows symlinks, and returns "" when it cannot.
+func resolve(p string) string {
+	r, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return ""
+	}
+	return r
+}
+
 // hookScript finds the guard rail script that ships with this build.
 func hookScript() (string, error) {
 	var candidates []string
 	if p := os.Getenv("CLUSAGE_HOOK_PATH"); p != "" {
 		candidates = append(candidates, p)
 	}
-	if exe, err := os.Executable(); err == nil {
-		if exe, err := filepath.EvalSymlinks(exe); err == nil {
-			// Homebrew and friends: <prefix>/bin/clusage next to
-			// <prefix>/share/clusage/hooks/clusage-guard.sh.
-			prefix := filepath.Dir(filepath.Dir(exe))
-			candidates = append(candidates,
-				filepath.Join(prefix, "share", "clusage", "hooks", hookScriptName),
-				filepath.Join(filepath.Dir(exe), "hooks", hookScriptName))
-		}
+	exe, err := os.Executable()
+	if err != nil {
+		exe = ""
 	}
-	candidates = append(candidates, filepath.Join("hooks", hookScriptName))
+	candidates = append(candidates, hookCandidates(exe)...)
 
 	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
