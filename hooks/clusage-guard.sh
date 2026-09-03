@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# clusage guard rail: a Claude Code PreToolUse hook.
+# clusage guard rail: a Claude Code hook. It handles two events.
 #
-# It pauses tool calls while the 5h rate limit window sits at or above a soft
-# threshold, and denies them once a 7d window passes a hard threshold. The
-# numbers come from `clusage usage`.
+# On PreToolUse it pauses tool calls while the 5h rate limit window sits at or
+# above a soft threshold, and denies them once a 7d window passes a hard
+# threshold. The numbers come from `clusage usage`.
+#
+# On SessionStart it reports what a resumed session costs to re-send, but only
+# once the prompt cache behind it has expired. Claude Code measures that and
+# passes it in, so this path calls nothing and adds no probe.
 #
 # Register it with `clusage hook install`, or run this script directly with
 # --install. Install links the script into the Claude Code hooks directory and
@@ -12,6 +16,7 @@
 #
 # Config (environment):
 #   CLUSAGE_GUARD_DISABLE=1     turn the guard off
+#   CLUSAGE_RESUME_DISABLE=1    turn the resume report off
 #   CLUSAGE_GUARD_5H=90         soft threshold, percent, pause and poll
 #   CLUSAGE_GUARD_7D=95         hard threshold, percent, deny without polling
 #   CLUSAGE_GUARD_INTERVAL=360  seconds between checks while under threshold
@@ -80,18 +85,32 @@ if os.path.exists(path):
     with open(path) as fh:
         settings = json.load(fh, object_pairs_hook=collections.OrderedDict)
 
+# One event per row: the event name, its matcher, and the hook timeout. The
+# guard rail needs the whole pause budget. The resume report only reads the
+# payload it is handed, so it needs seconds.
+EVENTS = [("PreToolUse", "*", timeout), ("SessionStart", "resume|fork", 10)]
+
 hooks = settings.setdefault("hooks", collections.OrderedDict())
-pre = hooks.setdefault("PreToolUse", [])
-mine = [e for e in pre
-        if any("clusage-guard" in h.get("command", "") for h in e.get("hooks", []))]
+
+
+# owned <entries>. The entries of one event that this script registered.
+def owned(entries):
+    return [e for e in entries
+            if any("clusage-guard" in h.get("command", "") for h in e.get("hooks", []))]
+
 
 if mode == "status":
-    if not mine:
+    found = False
+    for event, _, _ in EVENTS:
+        for entry in owned(hooks.get(event, [])):
+            for hook in entry["hooks"]:
+                if "clusage-guard" in hook.get("command", ""):
+                    found = True
+                    print("registered:", event, hook["command"],
+                          "(timeout %ss)" % hook.get("timeout", 60))
+    if not found:
         print("not registered in", path)
         sys.exit(1)
-    for entry in mine:
-        for hook in entry["hooks"]:
-            print("registered:", hook["command"], "(timeout %ss)" % hook.get("timeout", 60))
     if os.path.islink(script):
         # The immediate target, not the fully resolved path. Homebrew points
         # <prefix>/share/clusage at the installed version, and resolving that
@@ -107,24 +126,38 @@ if mode == "status":
     sys.exit(0)
 
 if mode == "install":
-    for entry in mine:
-        for hook in entry["hooks"]:
-            if "clusage-guard" in hook.get("command", ""):
-                hook["command"], hook["timeout"] = command, timeout
-    if not mine:
-        pre.append(collections.OrderedDict([
-            ("matcher", "*"),
-            ("hooks", [collections.OrderedDict([
-                ("type", "command"), ("command", command), ("timeout", timeout)])]),
-        ]))
+    for event, matcher, event_timeout in EVENTS:
+        entries = hooks.setdefault(event, [])
+        mine = owned(entries)
+        # An install over an older version rewrites the entry it already made,
+        # so a new event is added and an existing one is brought up to date.
+        for entry in mine:
+            entry["matcher"] = matcher
+            for hook in entry["hooks"]:
+                if "clusage-guard" in hook.get("command", ""):
+                    hook["command"], hook["timeout"] = command, event_timeout
+        if not mine:
+            entries.append(collections.OrderedDict([
+                ("matcher", matcher),
+                ("hooks", [collections.OrderedDict([
+                    ("type", "command"), ("command", command),
+                    ("timeout", event_timeout)])]),
+            ]))
     action = "installed"
 else:
-    hooks["PreToolUse"] = [e for e in pre if e not in mine]
-    if not hooks["PreToolUse"]:
-        del hooks["PreToolUse"]
+    found = False
+    for event, _, _ in EVENTS:
+        entries = hooks.get(event, [])
+        mine = owned(entries)
+        found = found or bool(mine)
+        keep = [e for e in entries if e not in mine]
+        if keep:
+            hooks[event] = keep
+        elif event in hooks:
+            del hooks[event]
     if not hooks:
         del settings["hooks"]
-    action = "removed" if mine else "was not registered"
+    action = "removed" if found else "was not registered"
 
 os.makedirs(os.path.dirname(path), exist_ok=True)
 with open(path, "w") as fh:
@@ -142,6 +175,65 @@ case "${1:-}" in
   "") ;;
   *) echo "clusage-guard: unknown flag $1 (want: --install, --uninstall, --status)" >&2; exit 1 ;;
 esac
+
+# --- the resume report ------------------------------------------------------
+
+# report_resume <payload>. Prints the systemMessage for a stale resume, and
+# returns non-zero when the payload is for another event, so the caller falls
+# through to the guard rail.
+report_resume() {
+  command -v python3 >/dev/null || return 1
+  python3 - "$1" <<'PY'
+import json, os, sys
+
+try:
+    payload = json.loads(sys.argv[1])
+except ValueError:
+    sys.exit(1)
+if payload.get("hook_event_name") != "SessionStart":
+    sys.exit(1)
+# The event is handled from here on, whether or not it prints anything. The
+# guard rail must not run on a session start.
+if os.environ.get("CLUSAGE_RESUME_DISABLE") == "1":
+    sys.exit(0)
+# Claude Code sends the four fields below on a resume or a fork, from v2.1.251.
+# An older build, a fresh session, or a live cache all mean nothing to report.
+if not payload.get("prompt_cache_likely_expired"):
+    sys.exit(0)
+try:
+    minutes = int(payload["seconds_since_last_response"]) // 60
+    tokens = int(payload["context_tokens"])
+    usd = float(payload["estimated_cache_write_usd"])
+except (KeyError, TypeError, ValueError):
+    sys.exit(0)
+size = "%.0fk" % (tokens / 1000.0) if tokens >= 1000 else str(tokens)
+report = ("clusage: prompt cache expired after %dm idle. This session re-sends "
+          "%s tokens, about $%.2f. Consider /compact." % (minutes, size, usd))
+# Two channels, because no single one reaches every client. A terminal shows
+# the systemMessage. The Claude desktop app runs Claude Code with
+# --output-format stream-json, where the message goes to the SDK stream and
+# never reaches the screen, so the same line is handed to Claude as context
+# with an instruction to say it.
+json.dump({"systemMessage": report,
+           "hookSpecificOutput": {
+               "hookEventName": "SessionStart",
+               "additionalContext":
+                   "%s Open this session by telling the user that line, in one "
+                   "sentence, before anything else." % report}},
+          sys.stdout)
+print()
+PY
+}
+
+# Claude Code writes the event payload to stdin. A hook run by hand has no
+# payload, and reads nothing.
+payload=""
+if [[ ! -t 0 ]]; then
+  IFS= read -r -d '' -t 2 payload
+fi
+if [[ -n "$payload" ]]; then
+  report_resume "$payload" && exit 0
+fi
 
 # --- the guard rail ---------------------------------------------------------
 
@@ -218,14 +310,13 @@ stop() {
   deny "clusage guard rail: the $1 window is exhausted (status $2), so overage is paying for this call. Stop all work now, in this agent and in every subagent. Do not retry, because every retry spends more. Tell the user the window is exhausted and end the turn. Set CLUSAGE_GUARD_ALLOW_OVERAGE=1 to work on overage anyway."
 }
 
-# Claude Code sends the PreToolUse event as JSON on stdin. Read the tool name,
-# so a scheduling tool can book the retry that a deny message just asked for.
-# An empty or absent stdin reads as an unknown tool, and never blocks.
+# tool_name <payload>. The tool name from the PreToolUse event, so a scheduling
+# tool can book the retry that a deny message just asked for. The payload is
+# read once, further up. An empty payload reads as an unknown tool, and never
+# blocks.
 tool_name() {
-  local input=""
-  read -r -t 1 -d '' input
-  [[ -z "$input" ]] && return 0
-  printf '%s' "$input" | python3 -c 'import json, sys
+  [[ -z "$1" ]] && return 0
+  printf '%s' "$1" | python3 -c 'import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -238,7 +329,7 @@ last=0
 [[ -f "$STATE" ]] && last=$(cat "$STATE" 2>/dev/null || echo 0)
 (( now - last < INTERVAL )) && exit 0
 
-tool=$(tool_name)
+tool=$(tool_name "$payload")
 for allowed in $ALLOW_TOOLS; do
   [[ "$tool" == "$allowed" ]] && exit 0
 done

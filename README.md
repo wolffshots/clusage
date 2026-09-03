@@ -167,8 +167,8 @@ configured value for one run.
 
 ## Guard rail hook
 
-`hooks/clusage-guard.sh` is a Claude Code `PreToolUse` hook. It reads the same
-numbers as `clusage usage` and acts on them before each tool call:
+`hooks/clusage-guard.sh` is a Claude Code hook. On `PreToolUse` it reads the
+same numbers as `clusage usage` and acts on them before each tool call:
 
 | Condition | Action |
 |---|---|
@@ -212,8 +212,10 @@ clusage hook uninstall    # remove it again
 ```
 
 Install does two things. It links the script that ships with this build into
-`~/.claude/hooks/clusage-guard.sh`, and it writes one `PreToolUse` entry naming
-that link. The rest of `settings.json` stays as it is.
+`~/.claude/hooks/clusage-guard.sh`, and it writes one `PreToolUse` entry and one
+`SessionStart` entry naming that link. The rest of `settings.json` stays as it
+is. An install over an older version adds the `SessionStart` entry and leaves
+everything else alone.
 
 The registered path is therefore the same on every machine, whatever the
 install prefix is. A `brew upgrade` replaces the script the link points at, so
@@ -261,6 +263,33 @@ the tool call through.
 
 A poll reads a new probe every time, so a pause costs one small API call per
 `CLUSAGE_GUARD_POLL` seconds.
+
+## Stale resume report
+
+The same script also runs on `SessionStart`, for a resumed or forked session. A
+prompt cache lives about an hour. Resume after that and the whole conversation
+is re-sent and cached again, at full price, before the first reply.
+
+Claude Code measures that gap and hands the hook four numbers, so the report
+costs no probe and no API call. When the cache has expired, the hook prints one
+line:
+
+```
+clusage: prompt cache expired after 90m idle. This session re-sends 182k tokens, about $1.14. Consider /compact.
+```
+
+The hook stays silent while the cache is still warm, and on a Claude Code older
+than v2.1.251, which does not send the numbers.
+
+The line goes out on two channels. A terminal shows the `systemMessage`. The
+Claude desktop app runs Claude Code with `--output-format stream-json`, where
+that message goes to the SDK stream instead of the screen, so the hook also
+hands the line to Claude as `additionalContext` and asks it to open with the
+warning.
+
+Compacting cannot save that cache. Nothing can, because the cost is already
+sunk once the gap has passed. `/compact` shrinks what the *next* hour re-sends.
+Set `CLUSAGE_RESUME_DISABLE=1` to turn the report off.
 
 ## Config
 
@@ -328,7 +357,7 @@ the wrong time. The Config tab flags it in red.
 ```sh
 go test ./...     # unit tests, plus a full render of every tab at 96x32
 go vet ./...
-bash hooks/clusage-guard.test.sh   # guard rail decisions and registration
+bash hooks/clusage-guard.test.sh   # hook decisions, resume report, registration
 ```
 
 `TestRenderTabs` drives the model through `Update` and logs each tab, so

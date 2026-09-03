@@ -107,6 +107,51 @@ fi
 
 rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
 
+# --- the resume report ------------------------------------------------------
+
+# The fixture below denies every tool call, so a payload that wrongly falls
+# through to the guard rail shows up as output instead of passing silently.
+printf '%s\n' "$high7" > "$TMP/fx"
+
+resume() { # resume <payload> <expect-substring, empty for no output>
+  rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+  out=$(printf '%s' "$1" | CLUSAGE_GUARD_FIXTURE="$TMP/fx" CLUSAGE_GUARD_POLL=1 \
+        CLUSAGE_GUARD_MAXWAIT=2 bash "$GUARD" 2>/dev/null)
+  if [[ -z "$2" ]]; then
+    [[ -z "$out" ]] && { pass=$((pass+1)); return; }
+  else
+    [[ "$out" == *"$2"* ]] && { pass=$((pass+1)); return; }
+  fi
+  fail=$((fail+1)); echo "FAIL: resume expected ${2:-<empty>}, got: ${out:-<empty>}"
+}
+
+stale='{"hook_event_name":"SessionStart","source":"resume",
+"seconds_since_last_response":5400,"context_tokens":182340,
+"prompt_cache_likely_expired":true,"estimated_cache_write_usd":1.1396}'
+resume "$stale" '"systemMessage"'
+# the desktop app never shows systemMessage, so the same line goes to Claude
+resume "$stale" '"additionalContext"'
+resume "$stale" "expired after 90m idle"
+resume "$stale" 're-sends 182k tokens, about $1.14'
+
+# cache still warm, so there is nothing to say
+resume "${stale/true/false}" ""
+
+# an older Claude Code sends the flag without the numbers
+resume '{"hook_event_name":"SessionStart","source":"resume",
+"prompt_cache_likely_expired":true}' ""
+
+# a fresh session carries none of the fields
+resume '{"hook_event_name":"SessionStart","source":"startup"}' ""
+
+out=$(printf '%s' "$stale" | CLUSAGE_RESUME_DISABLE=1 CLUSAGE_GUARD_FIXTURE="$TMP/fx" \
+      bash "$GUARD" 2>/dev/null)
+[[ -z "$out" ]] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: disable, got $out"; }
+
+# a tool call still reaches the guard rail, payload and all
+resume '{"hook_event_name":"PreToolUse","tool_name":"Bash"}' "7d limit is at 96%"
+rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+
 # registration round trip against a throwaway CLAUDE_CONFIG_DIR
 cfg="$TMP/claude"
 mkdir -p "$cfg"
@@ -124,12 +169,43 @@ bash "$cfg/hooks/clusage-guard.sh" --status >/dev/null \
   && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: running via the link broke"; }
 n=$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["hooks"]["PreToolUse"]))' "$cfg/settings.json")
 [[ "$n" == 1 ]] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: install not idempotent, got $n entries"; }
+# the session start entry sits beside the one the fixture already had
+mine=$(python3 -c '
+import json,sys
+d=json.load(open(sys.argv[1]))["hooks"]["SessionStart"]
+own=[e for e in d if any("clusage-guard" in h.get("command","") for h in e["hooks"])]
+print(len(d), len(own), own[0]["matcher"] if own else "-")' "$cfg/settings.json")
+[[ "$mine" == "2 1 resume|fork" ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: SessionStart registration, got $mine"; }
+bash "$GUARD" --status | grep -q "^registered: SessionStart" \
+  && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: status does not list SessionStart"; }
 head -c 20 "$cfg/settings.json" | grep -q '"model"' && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: key order not preserved"; }
 bash "$GUARD" --uninstall >/dev/null
-python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if "PreToolUse" not in d.get("hooks",{}) and "SessionStart" in d["hooks"] else 1)' "$cfg/settings.json" \
+python3 -c '
+import json,sys
+h=json.load(open(sys.argv[1])).get("hooks",{})
+own=[e for v in h.values() for e in v
+     if any("clusage-guard" in c.get("command","") for c in e["hooks"])]
+sys.exit(0 if "PreToolUse" not in h and not own
+         and h["SessionStart"][0]["hooks"][0]["command"] == "x" else 1)' "$cfg/settings.json" \
   && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: uninstall left residue"; }
 [[ ! -e "$cfg/hooks/clusage-guard.sh" ]] \
   && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: uninstall left the symlink"; }
+
+# an install over the PreToolUse-only version adds the new event and keeps the
+# rest of the file
+old="$TMP/old"
+mkdir -p "$old"
+printf '{"model":"opus","hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"bash %s/hooks/clusage-guard.sh","timeout":60}]}]}}\n' "$old" > "$old/settings.json"
+CLAUDE_CONFIG_DIR="$old" bash "$GUARD" --install >/dev/null
+upgraded=$(python3 -c '
+import json,sys
+h=json.load(open(sys.argv[1]))["hooks"]
+print(len(h["PreToolUse"]), len(h["SessionStart"]), h["PreToolUse"][0]["hooks"][0]["timeout"])' "$old/settings.json")
+[[ "$upgraded" == "1 1 60" ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: upgrade from the older install, got $upgraded"; }
+head -c 20 "$old/settings.json" | grep -q '"model"' && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: upgrade lost key order"; }
 
 # a real file at the link path is left alone
 mkdir -p "$cfg/hooks"; echo "mine" > "$cfg/hooks/clusage-guard.sh"
