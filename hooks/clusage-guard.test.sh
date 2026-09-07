@@ -232,6 +232,11 @@ gate "$(age 100) 10 5 60 0" skip "low usage, slow climb"
 # the guard must probe even though the level is only 10 percent. This is the
 # whole point of the projection term.
 gate "$(age 100) 10 5 3000 0" probe "low usage, violent climb"
+# The 7d rate drives the gate on its own. At 3000 points per hour the 95
+# percent cut is 108 seconds away, and a quarter of that is 27s, which the
+# floor raises to 30s. Deleting the 7d projection term leaves the ramp at
+# about 297s, so a 100s old check would hold and this case would fail.
+gate "$(age 100) 5 10 0 3000" probe "high 7d rate drives the gate"
 # A window already near its cut probes whatever the rate says.
 gate "$(age 100) 88 5 -1 -1" probe "near the cut, no rate"
 # A v0.8.0 stamp carries no rates and must behave exactly as before.
@@ -246,6 +251,18 @@ out=$(CLUSAGE_GUARD_INTERVAL=0 CLUSAGE_GUARD_FIXTURE="$TMP/fx" bash "$GUARD" \
       </dev/null 2>/dev/null)
 [[ "$out" == *'"deny"'* ]] && pass=$((pass+1)) \
   || { fail=$((fail+1)); echo "FAIL: gate interval 0 expected probe, got: ${out:-<empty>}"; }
+
+# A floor above the ceiling is a typo, and interval_for returns the ceiling.
+# The gate must not raise that result back to the floor. Here the ramp asks for
+# 60s, so a 100s old check is stale and the guard must probe. The stamp holds
+# three fields, so no rate is involved. A floor applied to the result would
+# wait 900s and stay silent, which allows a call that v0.8.0 denies.
+printf '%s\n' "$high7" > "$TMP/fx"
+printf '%s\n' "$(age 100) 33 96" > "$STAMP"
+out=$(CLUSAGE_GUARD_INTERVAL=60 CLUSAGE_GUARD_INTERVAL_MIN=900 \
+      CLUSAGE_GUARD_FIXTURE="$TMP/fx" bash "$GUARD" </dev/null 2>/dev/null)
+[[ "$out" == *'"deny"'* ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: gate floor above ceiling expected probe, got: ${out:-<empty>}"; }
 
 # an allowed call records both percents, so the next call can size its wait
 rm -f "$STAMP"

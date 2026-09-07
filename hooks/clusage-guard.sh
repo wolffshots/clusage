@@ -13,7 +13,8 @@
 # --install. Install links the script into the Claude Code hooks directory and
 # names that link in settings.json, so an upgrade of clusage upgrades the hook.
 # Run --status to see the current state, --uninstall to remove it. Run
-# --interval <5h percent> <7d percent> to print the wait the ramp picks.
+# --interval <5h percent> <7d percent> to print the wait the ramp picks. Run
+# --project <percent> <rate> <cut> to print the wait the projection picks.
 #
 # Config (environment):
 #   CLUSAGE_GUARD_DISABLE=1     turn the guard off
@@ -440,10 +441,13 @@ interval=$(interval_for "$pfive" "$pseven")
 # than the ramp thinks tightens the wait, and an unknown rate contributes
 # nothing, so a degraded path behaves exactly as v0.8.0 does.
 for cand in $(project "$pfive" "$rate5" "$SOFT") $(project "$pseven" "$rate7" "$HARD"); do
+  # Floor the candidate, not the result. interval_for already honors its own
+  # bounds, including the rule that a floor above the ceiling is a typo and the
+  # ceiling wins. Flooring the result would override that and make the gate
+  # wait longer than the ramp asked, which is the one thing this must not do.
+  (( cand < INTERVAL_MIN )) && cand=$INTERVAL_MIN
   (( cand < interval )) && interval=$cand
 done
-# Zero means check on every call, so never raise it off the floor.
-(( interval > 0 && interval < INTERVAL_MIN )) && interval=$INTERVAL_MIN
 (( now - last < interval )) && exit 0
 
 tool=$(tool_name "$payload")
