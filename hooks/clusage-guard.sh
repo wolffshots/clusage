@@ -41,7 +41,7 @@ INTERVAL_MIN=${CLUSAGE_GUARD_INTERVAL_MIN:-30}
 # unbound name fatal. The hook would then exit before it could deny. Fall back
 # to the default instead. INTERVAL needs no such guard, because it only ever
 # reaches awk, which coerces junk to zero.
-[[ "$INTERVAL_MIN" =~ ^[0-9]+$ ]] || INTERVAL_MIN=30
+[[ "$INTERVAL_MIN" =~ ^([1-9][0-9]*|0)$ ]] || INTERVAL_MIN=30
 POLL=${CLUSAGE_GUARD_POLL:-15}
 # A hook that blocks for minutes makes the Claude Code session look dead, and
 # the app kills it. Wait only for a short spike, then hand the decision back.
@@ -424,7 +424,7 @@ retry() {
     echo "The $1 window reported no reset time, so there is nothing to wait for. Stop all work now, in this agent and in every subagent. Report the limit to the user, and ask whether to stop here or keep working and pay overage. Wait for the answer. Do not decide it yourself."
     return 0
   fi
-  echo "It $2. Stop all other work now, in this agent and in every subagent. Do not run clusage again to check it, and trust that time. Do not schedule a resume by yourself. Ask the user first, as a short multiple choice question, and wait for the answer. Offer three options: wait for the reset and resume then, keep working now and pay overage, or stop here. Set a timer or a wake-up only if the user picks the first option."
+  echo "It $2. Stop all other work now, in this agent and in every subagent. Do not run clusage again to check it, and trust that time. Do not schedule a resume by yourself. Ask the user first, as a short multiple choice question, and wait for the answer. Offer three options: wait for the reset and resume then, keep working now and pay overage, or stop here. Set a timer or a wake-up only if the user picks the first option. If the user waits, chain the wake-ups. A wake-up caps at one hour, and a gap over 55 minutes expires the prompt cache. Use legs of 55 minutes or less. Count them in the wake-up text, as leg N of M. On an interim leg, schedule the next leg and do nothing else. Never call a tool to check the clock, because a tool call can be denied."
 }
 
 # stop <window> <status>. An exhausted window means overage pays for the call.

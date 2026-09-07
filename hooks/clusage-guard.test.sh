@@ -28,7 +28,7 @@ run() { # run <fixture-text> <expect: allow|deny> <expect-substring> [stdin-json
   else
     [[ "$out" == *'"deny"'* && "$out" == *"$3"* ]] && { pass=$((pass+1)); return; }
   fi
-  fail=$((fail+1)); echo "FAIL: expected $2 $3, got: ${out:-<empty>}"
+  fail=$((fail+1)); echo "FAIL: expected $2 ${3:-}, got: ${out:-<empty>}"
 }
 
 low="5h  33% used  allowed  resets Wed 19:30 (in 4h36m)
@@ -284,6 +284,17 @@ out=$(CLUSAGE_GUARD_INTERVAL_MIN=abc CLUSAGE_GUARD_FIXTURE="$TMP/fx" \
 [[ "$out" == *'"deny"'* ]] && pass=$((pass+1)) \
   || { fail=$((fail+1)); echo "FAIL: gate non-numeric floor expected deny, got: ${out:-<empty>}"; }
 
+# A floor of 030 must read as 30, not the octal 24 a leading zero would give in
+# bash arithmetic. A climb of 10 percent at 3000 points per hour toward the 90
+# percent cut projects a 24s floor-eligible wait. At floor 30 a 27s old check
+# still holds; at floor 24 it would already be stale. Only 30 must survive.
+printf '%s\n' "$high7" > "$TMP/fx"
+printf '%s\n' "$(age 27) 10 5 3000 0" > "$STAMP"
+out=$(CLUSAGE_GUARD_INTERVAL_MIN=030 CLUSAGE_GUARD_FIXTURE="$TMP/fx" \
+      bash "$GUARD" </dev/null 2>/dev/null)
+[[ -z "$out" ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: INTERVAL_MIN=030 must behave as 30, got: ${out:-<empty>}"; }
+
 # an allowed call records both percents, so the next call can size its wait
 rm -f "$STAMP"
 printf '%s\n' "$low" > "$TMP/fx"
@@ -364,6 +375,18 @@ run "$high5" deny "only if the user picks"
 run "$high7" deny "reported no reset time"
 run "$high7" deny "ask whether to stop here or keep working and pay overage"
 run "$high7" deny "Do not decide it yourself"
+
+# a long wait must be chained, because a wake-up caps at one hour and a gap
+# over 55 minutes expires the prompt cache
+run "$high5" deny "legs of 55 minutes or less"
+run "$high5" deny "leg N of M"
+run "$high5" deny "schedule the next leg and do nothing else"
+run "$high5" deny "Never call a tool to check the clock"
+# the no-reset branch has nothing to wait for, so it offers no legs
+out=$(printf '%s\n' "$high7" > "$TMP/fx"; rm -f "$STAMP"; \
+      CLUSAGE_GUARD_FIXTURE="$TMP/fx" bash "$GUARD" </dev/null 2>/dev/null)
+[[ "$out" != *"leg N of M"* ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: no-reset branch must not offer legs"; }
 
 # --- the resume report ------------------------------------------------------
 

@@ -218,6 +218,12 @@ the agent to set a timer or a wake-up for that time and to retry then, without
 running `clusage` again to check. Where the window reports no reset time, the
 deny tells the agent to stop and report to the user instead.
 
+A deny never parks the agent on its own. It asks you first, and it only sets a
+wake-up if you say to wait. A wait longer than 55 minutes is chained into legs,
+because a wake-up caps at one hour and a longer gap expires the prompt cache.
+Each interim leg schedules the next one and does nothing else, so a long wait
+costs almost no tokens.
+
 The exhausted case is different. A window that reports a status other than
 `allowed` has spent its quota, so the next call comes out of overage. The guard
 denies at once, with no wait and no retry advice, because waiting does not help
