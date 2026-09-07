@@ -367,7 +367,7 @@ out=$(printf '%s\n' "$high5" > "$TMP/fx"; rm -f "$STAMP"; \
   || { fail=$((fail+1)); echo "FAIL: no rate must give no trend clause"; }
 
 # a deny must send the decision to the user, not park the agent on its own
-run "$high5" deny "Do not schedule a resume by yourself"
+run "$high5" deny "Do not schedule a resume before the user answers"
 run "$high5" deny "multiple choice question"
 run "$high5" deny "keep working now and pay overage"
 run "$high5" deny "only if the user picks"
@@ -379,13 +379,14 @@ run "$high7" deny "Do not decide it yourself"
 # a long wait must be chained, because a wake-up caps at one hour and a gap
 # over 55 minutes expires the prompt cache
 run "$high5" deny "legs of 55 minutes or less"
-run "$high5" deny "leg N of M"
-run "$high5" deny "schedule the next leg and do nothing else"
+run "$high5" deny "Put the leg number, the total, and the reset time into the message"
+run "$high5" deny "On waking, read the leg number from that message"
+run "$high5" deny "schedule the next leg and do nothing else. Then end the turn"
 run "$high5" deny "Never call a tool to check the clock"
 # the no-reset branch has nothing to wait for, so it offers no legs
 out=$(printf '%s\n' "$high7" > "$TMP/fx"; rm -f "$STAMP"; \
       CLUSAGE_GUARD_FIXTURE="$TMP/fx" bash "$GUARD" </dev/null 2>/dev/null)
-[[ "$out" != *"leg N of M"* ]] && pass=$((pass+1)) \
+[[ "$out" != *"read the leg number from that message"* ]] && pass=$((pass+1)) \
   || { fail=$((fail+1)); echo "FAIL: no-reset branch must not offer legs"; }
 
 # --- the resume report ------------------------------------------------------
