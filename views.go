@@ -267,28 +267,35 @@ func (m model) historyView(height int) string {
 	}
 
 	chartW := contentWidth(m.width, 10)
-	// Rows for the title, the x-axis line, the summary, and the other windows'
-	// sparklines, so the chart never pushes the footer off screen.
-	budget := height - 5 - len(wins)
+	// Six rows below carry no chart: the title and its blank line, the x-axis
+	// and its blank line, and the summary and its blank line. Each window adds
+	// one sparkline row. What is left is the budget the two charts share, so
+	// the charts never push a sparkline row past clip.
+	budget := height - 6 - len(wins)
 	budget = clamp(budget, 3, 22)
 
 	rateVals, _ := rateSeries(m.history, sel.Name)
-	// The rate chart costs 3 chart rows plus 1 axis row. Above 7 rows of
-	// budget both charts fit, and utilization takes the larger half. Between 4
-	// and 6 the rate falls back to one sparkline row. Under 4 it is dropped.
+	// A rate block of rateH rows writes rateH+1 rows. The tall branch draws
+	// rateH-1 chart rows, a label row, and a blank line. The one row fallback
+	// draws a glyph row and a blank line. Take that extra row off the chart, so
+	// the block pays its true cost.
+	//
+	// The tall branch needs 3 chart rows, 4 rate rows, and that extra row, so
+	// it starts at a budget of 8. The fallback needs 3 chart rows plus 2, so it
+	// starts at 5. Under 5 the rate block is dropped.
 	chartH, rateH := budget, 0
 	switch {
 	case len(rateVals) == 0:
 		// nothing to draw
-	case budget >= 7:
+	case budget >= 8:
 		rateH = budget / 3
 		if rateH < 4 {
 			rateH = 4
 		}
-		chartH = budget - rateH
-	case budget >= 4:
+		chartH = budget - rateH - 1
+	case budget >= 5:
 		rateH = 1
-		chartH = budget - 1
+		chartH = budget - 2
 	}
 	chartH = clamp(chartH, 3, 16)
 
@@ -343,9 +350,18 @@ func (m model) historyView(height int) string {
 			dimStyle.Render("burn rate, %/h") + "\n\n")
 	} else if rateH == 1 {
 		sust := sustainableRate(sel.Name)
-		glyphs, cols := sparkline(rateVals, chartW)
+		// One areaChart row, not a sparkline, so the fallback keeps the same 0
+		// based scale as the tall branch. sparkline autoscales between the
+		// series min and max with no floor on the span, which draws a flat rate
+		// as a sawtooth of utilization rounding noise.
+		//
+		// areaChart pads a short series out to the full width, and this row
+		// carries a 12 column label against the chart's 5 column gutter. So
+		// draw 7 columns narrower, and the right edge lands under the chart's.
+		_, top := bounds(rateVals)
+		rows, cols := areaChart(rateVals, chartW-7, 1, 0, top)
 		b.WriteString("  " + dimStyle.Render(padRight("burn %/h", 10)) +
-			colorRateCols(glyphs, cols, sust) + "\n\n")
+			colorRateCols(rows[0], cols, sust) + "\n\n")
 	}
 
 	min, max := bounds(series)

@@ -227,3 +227,91 @@ func TestHistoryViewDegradesOnAShortTerminal(t *testing.T) {
 		}
 	}
 }
+
+// flatRateReadings builds a history whose burn rate is exactly constant. Every
+// step adds one sixteenth of the window, and a four decimal string carries that
+// value without rounding. So every pair reports the same instant rate, down to
+// the last bit, and the rate series is genuinely flat.
+func flatRateReadings(n int) []Reading {
+	out := make([]Reading, n)
+	base := time.Now().Add(-time.Duration(n) * 20 * time.Minute)
+	for i := range out {
+		out[i] = Reading{
+			FetchedAt: base.Add(time.Duration(i) * 20 * time.Minute),
+			Model:     "claude-opus-5",
+			Headers: map[string]string{
+				"anthropic-ratelimit-unified-5h-utilization": ftoa(float64(i) / 16),
+				"anthropic-ratelimit-unified-5h-status":      "allowed",
+			},
+		}
+	}
+	return out
+}
+
+// TestHistoryViewKeepsEveryWindowSparkline pins the row budget. The rate block
+// must pay for its own label row and blank line. If it does not, clip eats the
+// comparison sparklines off the bottom of the view.
+func TestHistoryViewKeepsEveryWindowSparkline(t *testing.T) {
+	hist := seedReadings(24)
+	m := model{
+		width:   100,
+		latest:  hist[len(hist)-1],
+		hasData: true,
+		history: hist,
+		cfg:     defaultConfig,
+	}
+	// Height 32 is the tall case. Height 27 is the body a 32 row terminal
+	// gives this view, and the budget that undercounted the rate block clipped
+	// two sparkline rows there.
+	for _, height := range []int{27, 32} {
+		out := m.historyView(height)
+		if !strings.Contains(out, "burn rate, %/h") {
+			t.Fatalf("height %d drew no rate chart, so this case proves nothing:\n%s",
+				height, out)
+		}
+		for _, name := range []string{"5h", "7d", "7d-opus"} {
+			if !strings.Contains(out, padRight(name, 10)) {
+				t.Fatalf("height %d lost the %s sparkline row:\n%s", height, name, out)
+			}
+		}
+		if lines := strings.Count(out, "\n") + 1; lines > height {
+			t.Fatalf("height %d produced %d lines, which pushes the footer off screen:\n%s",
+				height, lines, out)
+		}
+	}
+}
+
+// TestHistoryViewFallbackDrawsAFlatRateFlat pins the one row fallback to a zero
+// based scale. sparkline autoscales between the series min and max with no
+// floor on the span, so it draws a flat rate as a sawtooth.
+func TestHistoryViewFallbackDrawsAFlatRateFlat(t *testing.T) {
+	hist := flatRateReadings(12)
+	m := model{
+		width:   100,
+		latest:  hist[len(hist)-1],
+		hasData: true,
+		history: hist,
+		cfg:     defaultConfig,
+	}
+	// One window and a height of 13 leave a budget of 6, which is the one row
+	// fallback branch.
+	out := m.historyView(13)
+	row := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "burn %/h") {
+			row = line
+		}
+	}
+	if row == "" {
+		t.Fatalf("height 13 drew no fallback burn row:\n%s", out)
+	}
+	seen := map[rune]bool{}
+	for _, r := range row {
+		if strings.ContainsRune(string(sparkLevels), r) {
+			seen[r] = true
+		}
+	}
+	if len(seen) != 1 {
+		t.Fatalf("a flat rate must draw one glyph, got %d in %q:\n%s", len(seen), row, out)
+	}
+}
