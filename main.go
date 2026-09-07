@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -54,11 +56,11 @@ func setup() error {
 	token := strings.TrimSpace(string(raw))
 	if err != nil {
 		// Not a terminal, read the line normally.
-		line, rerr := bufio.NewReader(os.Stdin).ReadString('\n')
+		line, rerr := readTokenLine(os.Stdin)
 		if rerr != nil {
 			return err
 		}
-		token = strings.TrimSpace(line)
+		token = line
 	}
 	if token == "" {
 		return fmt.Errorf("no token entered")
@@ -73,6 +75,17 @@ func setup() error {
 	fmt.Println("token stored in login keychain (service: clusage)")
 	fmt.Println("config:", path)
 	return nil
+}
+
+// readTokenLine reads one token from a non-terminal stdin. A last line with no
+// trailing newline still counts, because a piped token often has none.
+func readTokenLine(r io.Reader) (string, error) {
+	line, err := bufio.NewReader(r).ReadString('\n')
+	token := strings.TrimSpace(line)
+	if err != nil && (!errors.Is(err, io.EOF) || token == "") {
+		return "", err
+	}
+	return token, nil
 }
 
 func usage(args []string) error {

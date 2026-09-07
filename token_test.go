@@ -146,3 +146,22 @@ func TestTokensViewEmptyState(t *testing.T) {
 		t.Errorf("empty tokens view lost the all-time line:\n%s", out)
 	}
 }
+
+// A piped token often has no trailing newline. ReadString then returns the
+// whole token together with io.EOF, and treating that as a failure threw the
+// token away.
+func TestReadTokenLineAcceptsInputWithoutANewline(t *testing.T) {
+	got, err := readTokenLine(strings.NewReader("sk-ant-oat01-abc"))
+	if err != nil {
+		t.Fatalf("readTokenLine() error = %v", err)
+	}
+	if got != "sk-ant-oat01-abc" {
+		t.Fatalf("readTokenLine() = %q", got)
+	}
+	if got, err := readTokenLine(strings.NewReader("sk-ant-oat01-abc\n")); err != nil || got != "sk-ant-oat01-abc" {
+		t.Fatalf("readTokenLine() = %q, %v", got, err)
+	}
+	if _, err := readTokenLine(strings.NewReader("")); err == nil {
+		t.Fatal("readTokenLine(empty) = nil error, want a failure")
+	}
+}
