@@ -131,10 +131,21 @@ the API. Press `r` for a fresh reading.
 **Now** draws a gauge per limit window with its status and reset time. The
 color tracks load: green under 60%, amber under 85%, red at or above 85%.
 
+**Now** also shows `burn 14.2%/h   full in 4h43m` under each gauge. The
+projection targets 100 percent, because the question a usage viewer answers is
+when the window is spent. The guard rail keeps its own thresholds in its own
+config, so the two never disagree by accident. A window with too little
+history reads `burn -`.
+
 **History** graphs the selected window over the chosen span, with a sparkline
 per window underneath for comparison. The scale is fixed at 0 to 100% rather
 than autoscaled, because a week that sat between 40% and 42% would otherwise
 render as a crisis.
+
+**History** graphs the burn rate under the utilization chart, on its own
+`%/h` scale, because a rate has no natural ceiling. A short terminal drops the
+rate chart to a single sparkline row, and a very short one drops it entirely,
+so the help footer always stays visible.
 
 **Tokens** graphs what clusage spent on its own probe calls: a cumulative
 total over the chosen span, a per-call sparkline, and the breakdown into input,
@@ -161,6 +172,23 @@ clusage usage -verbose    # also print every header and the token cost
 clusage usage -model claude-sonnet-5
 clusage usage -threshold 15
 ```
+
+The table carries one row per window:
+
+```text
+5h       61% used   allowed          14.2%/h   resets Wed 19:30 (in 4h36m)
+7d       41% used   allowed           0.9%/h   resets Mon 18:00 (in 123h6m)
+overage   0% used   allowed
+```
+
+The `%/h` column is the burn rate: percent of that window consumed per hour. A
+rate of `100%/h` empties the window in one hour. It comes from the stored
+utilization history, not from the token counts, because the `calls` table only
+records what clusage's own probe calls cost.
+
+The column is blank when the history cannot support an estimate. That covers a
+fresh database, the minutes right after a window resets, and a history whose
+newest reading is too old to speak for now.
 
 Flag defaults come from `config.json`, so a flag is only needed to override the
 configured value for one run.
@@ -245,6 +273,18 @@ usage. It falls to 30s near a threshold, where overshooting into overage costs
 more than the probes do. Run `bash clusage-guard.sh --interval <5h> <7d>` to
 print the wait for any pair. Set both bounds to the same number for a fixed
 interval. A cached check costs about 20ms.
+
+The ramp is the floor, not the whole rule. When the table carries a burn rate,
+the guard also projects when each window reaches its own threshold, and takes
+whichever wait is shorter:
+
+    project = (threshold - percent) / rate * 3600 / 4
+
+The division by four lands four checks before the threshold rather than one.
+An unknown or falling rate contributes nothing, so the ramp decides on its own.
+
+Run `bash clusage-guard.sh --project <percent> <rate> <cut>` to print the wait
+for any triple.
 
 ### Guard rail settings
 
