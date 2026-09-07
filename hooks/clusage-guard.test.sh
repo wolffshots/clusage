@@ -30,6 +30,10 @@ low="5h  33% used  allowed  resets Wed 19:30 (in 4h36m)
 overage 78% used allowed_warning"
 run "$low" allow
 
+low_rate="5h  33% used  allowed  14.2%/h  resets Wed 19:30 (in 4h36m)
+7d  20% used  allowed  0.9%/h  resets Mon 18:00 (in 123h6m)
+overage 78% used allowed_warning"
+
 high5="5h  94% used  allowed_warning  resets Wed 19:30 (in 4h36m)
 7d  20% used  allowed"
 run "$high5" deny "5h limit is at 94% and did not drop"
@@ -160,6 +164,26 @@ got=$(CLUSAGE_GUARD_INTERVAL=360 CLUSAGE_GUARD_INTERVAL_MIN=360 \
 [[ "$got" == 360 ]] && pass=$((pass+1)) \
   || { fail=$((fail+1)); echo "FAIL: equal bounds, got $got"; }
 
+# --- the projection ---------------------------------------------------------
+
+pj() { # pj <percent> <rate> <cut> <expect seconds, or empty>
+  got=$(bash "$GUARD" --project "$1" "$2" "$3" 2>/dev/null)
+  [[ "$got" == "$4" ]] && { pass=$((pass+1)); return; }
+  fail=$((fail+1)); echo "FAIL: project $1/$2/$3 expected '${4:-<empty>}', got '${got:-<empty>}'"
+}
+
+# 60 points of headroom at 30 points per hour is 2h, and a quarter of that is
+# 1800s.
+pj 30 30 90 1800
+# 1 point of headroom at 30 points per hour is 2 minutes, a quarter is 30s.
+pj 89 30 90 30
+# an unknown, zero or negative rate has nothing to project
+pj 30 "" 90 ""
+pj 30 0 90 ""
+pj 30 -5 90 ""
+# a cut already behind us has nothing to project
+pj 95 30 90 ""
+
 # --- the stamp gate ---------------------------------------------------------
 
 STAMP="${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
@@ -195,13 +219,53 @@ gate "garbage" probe "unreadable stamp"
 gate "" probe "empty stamp"
 gate "-" probe "no stamp"
 
+# --- the projection tightens the gate ---------------------------------------
+
+# 10 percent with no rate waits about 297s, so a 100s old check holds.
+gate "$(age 100) 10 5 -1 -1" skip "low usage, no rate"
+# The same level climbing at 60 points per hour reaches the 90 percent cut in
+# 80 minutes. A quarter of that is 1200s, which is still slower than the ramp,
+# so the ramp still wins and the check holds.
+gate "$(age 100) 10 5 60 0" skip "low usage, slow climb"
+# At 3000 points per hour the 90 percent cut is 96 seconds away. A quarter of
+# that is 24s, which the floor raises to 30s, so a 100s old check is stale and
+# the guard must probe even though the level is only 10 percent. This is the
+# whole point of the projection term.
+gate "$(age 100) 10 5 3000 0" probe "low usage, violent climb"
+# A window already near its cut probes whatever the rate says.
+gate "$(age 100) 88 5 -1 -1" probe "near the cut, no rate"
+# A v0.8.0 stamp carries no rates and must behave exactly as before.
+gate "$(age 100) 10 5" skip "v0.8.0 stamp, low usage"
+gate "$(age 400) 10 5" probe "v0.8.0 stamp, stale"
+
+# Zero means check on every call, so the floor must not raise it. A brand new
+# stamp still probes. A floor applied without that guard would skip instead.
+printf '%s\n' "$high7" > "$TMP/fx"
+printf '%s\n' "$(age 0) 10 5 -1 -1" > "$STAMP"
+out=$(CLUSAGE_GUARD_INTERVAL=0 CLUSAGE_GUARD_FIXTURE="$TMP/fx" bash "$GUARD" \
+      </dev/null 2>/dev/null)
+[[ "$out" == *'"deny"'* ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: gate interval 0 expected probe, got: ${out:-<empty>}"; }
+
 # an allowed call records both percents, so the next call can size its wait
 rm -f "$STAMP"
 printf '%s\n' "$low" > "$TMP/fx"
 CLUSAGE_GUARD_FIXTURE="$TMP/fx" bash "$GUARD" </dev/null >/dev/null 2>&1
-read -r _ sfive sseven < "$STAMP"
+# The stamp now holds two rates after the percents, which the last variable
+# absorbs. This case still proves a table with no rate column stamps both
+# percents.
+read -r _ sfive sseven _rest < "$STAMP"
 [[ "$sfive" == 33 && "$sseven" == 20 ]] && pass=$((pass+1)) \
   || { fail=$((fail+1)); echo "FAIL: stamp percents, got 5h=$sfive 7d=$sseven"; }
+
+# an allowed call records both percents and both rates
+rm -f "$STAMP"
+printf '%s\n' "$low_rate" > "$TMP/fx"
+CLUSAGE_GUARD_FIXTURE="$TMP/fx" bash "$GUARD" </dev/null >/dev/null 2>&1
+read -r _ sfive sseven r5 r7 < "$STAMP"
+[[ "$sfive" == 33 && "$sseven" == 20 && "$r5" == 14.2 && "$r7" == 0.9 ]] \
+  && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: stamp rates, got $sfive $sseven $r5 $r7"; }
 
 # the reading cache tracks the wait, so a fast poll never reads a stale probe
 mkdir -p "$TMP/bin"

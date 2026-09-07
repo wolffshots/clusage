@@ -80,11 +80,26 @@ interval_for() {
   }'
 }
 
-# mark <5h percent> <7d percent>. Records when the last check ran and what it
-# saw, so the next call sizes its own wait from the same numbers. An older
-# stamp holds the time alone, which reads as no load.
+# project <percent> <rate> <cut>. Seconds until the window reaches cut at this
+# rate, divided by four so four checks land before it rather than one. Prints
+# nothing when the rate is unknown or not positive, or when the cut is already
+# behind, because there is then nothing to project.
+project() {
+  awk -v p="${1:--1}" -v r="${2:-0}" -v c="${3:-0}" 'BEGIN {
+    if (r + 0 <= 0) exit
+    if (p + 0 < 0) exit
+    if (c + 0 <= p + 0) exit
+    n = int((c - p) / r * 3600 / 4 + 0.5)
+    print (n < 1) ? 1 : n
+  }'
+}
+
+# mark <5h percent> <7d percent> <5h rate> <7d rate>. Records when the last
+# check ran and what it saw, so the next call sizes its own wait from the same
+# numbers. An older stamp holds fewer fields, which read as unknown.
 mark() {
-  printf '%s %s %s\n' "$(date +%s)" "${1:--1}" "${2:--1}" > "$STATE"
+  printf '%s %s %s %s %s\n' "$(date +%s)" \
+    "${1:--1}" "${2:--1}" "${3:--1}" "${4:--1}" > "$STATE"
 }
 
 # --- registration -----------------------------------------------------------
@@ -213,8 +228,9 @@ case "${1:-}" in
   --status)    [[ -e "$OFF" ]] && echo "off switch present: $OFF"
                manage status; exit $? ;;
   --interval)  interval_for "${2:-}" "${3:-}"; exit 0 ;;
+  --project)   project "${2:-}" "${3:-}" "${4:-}"; exit 0 ;;
   "") ;;
-  *) echo "clusage-guard: unknown flag $1 (want: --install, --uninstall, --status, --interval)" >&2; exit 1 ;;
+  *) echo "clusage-guard: unknown flag $1 (want: --install, --uninstall, --status, --interval, --project)" >&2; exit 1 ;;
 esac
 
 # --- the resume report ------------------------------------------------------
@@ -299,23 +315,26 @@ read_usage() {
   fi
 }
 
-# win <table> <window prefix>. "<percent>|<status>|<reset>" for the highest
-# matching window. The percent is -1 when nothing matched. The reset is the
-# text from the "resets" field to the end of the line, and is empty when the
-# window reported none. An exhausted status wins over the one on the highest
+# win <table> <window prefix>. "<percent>|<status>|<rate>|<reset>" for the
+# highest matching window. The percent is -1 when nothing matched. The rate is
+# the field ending in "%/h", found by scanning rather than by position, so an
+# older clusage that prints no such field reads as an unknown rate. The reset
+# is the text from the "resets" field to the end of the line, and stays last
+# because it holds spaces. An exhausted status wins over the one on the highest
 # row, because a sibling window such as 7d-opus can be spent at a low percent.
 win() {
   awk -v p="$2" '$1 ~ "^"p && $2 ~ /%$/ {
     t = ($4 == "resets" ? "" : $4)
     if (x == "" && t != "" && t !~ /^allowed/) x = t
     if (m == "" || $2+0 > m) {
-      m = $2+0; s = t; r = ""
+      m = $2+0; s = t; r = ""; b = ""
+      for (i = 4; i <= NF; i++) if ($i ~ /%\/h$/) { b = $i; sub(/%\/h$/, "", b); break }
       for (i = 4; i <= NF; i++) if ($i == "resets") {
         for (j = i; j <= NF; j++) r = r (j > i ? " " : "") $j
         break
       }
     }
-  } END { printf "%s|%s|%s\n", (m == "" ? -1 : m), (x == "" ? s : x), r }' <<<"$1"
+  } END { printf "%s|%s|%s|%s\n", (m == "" ? -1 : m), (x == "" ? s : x), b, r }' <<<"$1"
 }
 
 # ge <a> <b>. True when a is at least b. A percent can carry a fraction, and
@@ -331,14 +350,23 @@ spent() {
   [[ -n "$s" && "$s" != allowed* ]]
 }
 
+# field <n> <pipe-separated string>. The nth field, one based.
+field() {
+  local IFS='|'
+  local -a parts
+  read -r -a parts <<<"$2"
+  printf '%s' "${parts[$(($1 - 1))]:-}"
+}
+
 # check <cache-minutes>. One decision line:
 #
-#   verdict|window|percent|status|5h percent|7d percent|reset
+#   verdict|window|percent|status|5h percent|7d percent|5h rate|7d rate|reset
 #
 # The verdict, the window it names and that window's own fields come first. The
-# two raw percents follow, because the caller sizes its next wait from both,
-# whichever window tripped. The reset text holds spaces, so it stays last for
-# the reader to absorb. Nothing is printed when clusage is unavailable.
+# two raw percents and the two raw rates follow, because the caller sizes its
+# next wait from all four, whichever window tripped. The reset text holds
+# spaces, so it stays last for the reader to absorb. Nothing is printed when
+# clusage is unavailable.
 check() {
   local table five seven verdict=OK name=5h w pct status reset
   table=$(read_usage "$1")
@@ -357,9 +385,12 @@ check() {
   fi
   w=$five
   [[ "$name" == 7d ]] && w=$seven
-  IFS='|' read -r pct status reset <<<"$w"
-  printf '%s|%s|%s|%s|%s|%s|%s\n' "$verdict" "$name" "$pct" "$status" \
-    "${five%%|*}" "${seven%%|*}" "$reset"
+  IFS='|' read -r pct status _ reset <<<"$w"
+  # verdict|window|percent|status|5h percent|7d percent|5h rate|7d rate|reset.
+  # The two percents and the two rates drive the poll interval. The reset text
+  # holds spaces, so it stays last for the reader to absorb.
+  printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$verdict" "$name" "$pct" "$status" \
+    "${five%%|*}" "${seven%%|*}" "$(field 3 "$five")" "$(field 3 "$seven")" "$reset"
 }
 
 # retry <window> <reset>. Tells the caller when to come back.
@@ -391,18 +422,28 @@ print(d.get("tool_name", "") if isinstance(d, dict) else "")' 2>/dev/null
 }
 
 now=$(date +%s)
-last=0 pfive=-1 pseven=-1
+last=0 pfive=-1 pseven=-1 rate5=-1 rate7=-1
 if [[ -f "$STATE" ]]; then
-  # "<unix time> <5h percent> <7d percent>". An older build wrote the time
-  # alone, and a truncated write leaves nothing usable, so each field is taken
-  # only when it reads as one.
-  ts="" p5="" p7=""
-  read -r ts p5 p7 < "$STATE" 2>/dev/null
+  # "<unix time> <5h percent> <7d percent> <5h rate> <7d rate>". An older build
+  # wrote fewer fields, and a truncated write leaves nothing usable, so each
+  # field is taken only when it reads as one.
+  ts="" p5="" p7="" b5="" b7=""
+  read -r ts p5 p7 b5 b7 < "$STATE" 2>/dev/null
   [[ "$ts" =~ ^[0-9]+$ ]] && last=$ts
   [[ -n "$p5" ]] && pfive=$p5
   [[ -n "$p7" ]] && pseven=$p7
+  [[ -n "$b5" ]] && rate5=$b5
+  [[ -n "$b7" ]] && rate7=$b7
 fi
 interval=$(interval_for "$pfive" "$pseven")
+# The level ramp is the floor. A projection that says the threshold is closer
+# than the ramp thinks tightens the wait, and an unknown rate contributes
+# nothing, so a degraded path behaves exactly as v0.8.0 does.
+for cand in $(project "$pfive" "$rate5" "$SOFT") $(project "$pseven" "$rate7" "$HARD"); do
+  (( cand < interval )) && interval=$cand
+done
+# Zero means check on every call, so never raise it off the floor.
+(( interval > 0 && interval < INTERVAL_MIN )) && interval=$INTERVAL_MIN
 (( now - last < interval )) && exit 0
 
 tool=$(tool_name "$payload")
@@ -413,7 +454,7 @@ done
 # A probe older than the wait it just sized would report a stale number, so the
 # reading cache tracks the interval. Under a minute this floors to zero, which
 # is what a fast poll needs.
-IFS='|' read -r verdict name value status pfive pseven reset <<<"$(check $((interval / 60)))"
+IFS='|' read -r verdict name value status pfive pseven rate5 rate7 reset <<<"$(check $((interval / 60)))"
 
 if [[ "$verdict" == "SPENT" ]]; then
   stop "$name" "$status"
@@ -428,7 +469,7 @@ if [[ "$verdict" == "SOFT" ]]; then
   while (( waited < MAXWAIT )); do
     sleep "$POLL"
     waited=$(( waited + POLL ))
-    IFS='|' read -r verdict name value status pfive pseven reset <<<"$(check 0)"
+    IFS='|' read -r verdict name value status pfive pseven rate5 rate7 reset <<<"$(check 0)"
     if [[ "$verdict" == "SPENT" ]]; then
       stop "$name" "$status"
     fi
@@ -437,12 +478,12 @@ if [[ "$verdict" == "SOFT" ]]; then
     fi
     if [[ "$verdict" == "OK" ]]; then
       echo "clusage guard rail: 5h usage back down to ${value}%, work resumed after ${waited}s." >&2
-      mark "$pfive" "$pseven"
+      mark "$pfive" "$pseven" "$rate5" "$rate7"
       exit 0
     fi
   done
   deny "clusage guard rail: the 5h limit is at ${value}% and did not drop in ${MAXWAIT}s (soft limit ${SOFT}%). $(retry 5h "$reset")"
 fi
 
-mark "$pfive" "$pseven"
+mark "$pfive" "$pseven" "$rate5" "$rate7"
 exit 0
