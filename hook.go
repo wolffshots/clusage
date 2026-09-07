@@ -60,7 +60,12 @@ func hookCandidates(exe string) []string {
 			add(c)
 		}
 	}
-	add(filepath.Join("hooks", hookScriptName))
+	// The cwd-relative copy is only offered in development. Otherwise
+	// "clusage hook install" run inside any cloned repo that happens to hold a
+	// hooks/clusage-guard.sh would run that repo's script through bash.
+	if os.Getenv("CLUSAGE_DEV") != "" {
+		add(filepath.Join("hooks", hookScriptName))
+	}
 	return out
 }
 

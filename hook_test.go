@@ -23,12 +23,25 @@ func TestHookScriptPrefersEnv(t *testing.T) {
 
 func TestHookScriptFindsRepoCopy(t *testing.T) {
 	t.Setenv("CLUSAGE_HOOK_PATH", "")
+	t.Setenv("CLUSAGE_DEV", "1")
 	got, err := hookScript()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := filepath.Join("hooks", hookScriptName); got != want {
 		t.Fatalf("hookScript() = %q, want %q", got, want)
+	}
+}
+
+// Without CLUSAGE_DEV the cwd-relative script is not a candidate, so running
+// "clusage hook install" inside a foreign repo cannot execute that repo's copy.
+func TestHookCandidatesSkipTheRelativePathOutsideDev(t *testing.T) {
+	t.Setenv("CLUSAGE_DEV", "")
+	rel := filepath.Join("hooks", hookScriptName)
+	for _, p := range hookCandidates("/opt/homebrew/bin/clusage") {
+		if p == rel {
+			t.Fatalf("hookCandidates() offered %q without CLUSAGE_DEV", rel)
+		}
 	}
 }
 
