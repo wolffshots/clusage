@@ -11,6 +11,20 @@ import (
 // larger value smooths more and reacts slower.
 const tauDivisor = 8
 
+// resetDrop is how far utilization must fall before it reads as a window
+// rollover rather than as accounting noise. It is a 0..1 fraction, so 0.02 is
+// two whole percent.
+//
+// A changed reset header looks like a better signal, and the design doc names
+// it. It is not used, because a reset that rolls forward on every reading
+// would make every pair a new segment, and the rate would never seed. A fall
+// this large catches every real rollover.
+const resetDrop = 0.02
+
+// staleTaus is how many smoothing horizons may pass after the newest reading
+// before burnRate refuses to report.
+const staleTaus = 4
+
 // defaultWindowLength is assumed for a window whose name carries no length,
 // such as "overage".
 const defaultWindowLength = 5 * time.Hour
@@ -88,6 +102,13 @@ func rateWalk(pts []ratePoint, tau time.Duration) ([]float64, []bool) {
 	ok := make([]bool, len(pts))
 	ewma, seeded := 0.0, false
 	for i := 1; i < len(pts); i++ {
+		if pts[i].frac < pts[i-1].frac-resetDrop {
+			// The window rolled over. Start again rather than record the fall
+			// as a large negative rate.
+			ewma, seeded = 0, false
+			vals[i], ok[i] = 0, false
+			continue
+		}
 		dt := pts[i].at.Sub(pts[i-1].at)
 		if dt > 0 {
 			// Utilization is a 0..1 fraction, so scale to whole percents.
@@ -102,4 +123,50 @@ func rateWalk(pts []ratePoint, tau time.Duration) ([]float64, []bool) {
 		vals[i], ok[i] = ewma, seeded
 	}
 	return vals, ok
+}
+
+// burnRate returns percent of the window consumed per hour, and ok=false when
+// the history cannot support an estimate. That covers an empty or one-point
+// history, the minutes right after a window rollover, and a newest reading too
+// old to speak for now.
+func burnRate(readings []Reading, name string, now time.Time) (float64, bool) {
+	pts := ratePoints(readings, name)
+	if len(pts) < 2 {
+		return 0, false
+	}
+	tau := tauFor(name)
+	gap := now.Sub(pts[len(pts)-1].at)
+	if gap > staleTaus*tau {
+		return 0, false
+	}
+	vals, ok := rateWalk(pts, tau)
+	last := len(pts) - 1
+	if !ok[last] {
+		return 0, false
+	}
+	rate := vals[last]
+	if gap > 0 {
+		// Decay toward zero over the gap since the last reading, so a rate
+		// measured an hour ago does not report as current.
+		rate *= math.Exp(-gap.Seconds() / tau.Seconds())
+	}
+	return rate, true
+}
+
+// rateSeries returns the burn rate at every reading that carries one, oldest
+// first, with the timestamp each rate belongs to. The history chart graphs
+// this. It applies no staleness decay, because every point is dated.
+func rateSeries(readings []Reading, name string) ([]float64, []time.Time) {
+	pts := ratePoints(readings, name)
+	vals, ok := rateWalk(pts, tauFor(name))
+	var outVals []float64
+	var outStamps []time.Time
+	for i := range pts {
+		if !ok[i] {
+			continue
+		}
+		outVals = append(outVals, vals[i])
+		outStamps = append(outStamps, pts[i].at)
+	}
+	return outVals, outStamps
 }
