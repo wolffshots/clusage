@@ -85,7 +85,11 @@ func fetchUsage(ctx context.Context, token, model string) (map[string]string, to
 		}
 	}
 	if raw != nil {
-		if h := rateLimitHeaders(raw.Header); len(h) > 0 {
+		// Only swallow the error when the response really carries usable
+		// windows. A 5xx or a 401 can carry a rate limit header that
+		// parseWindows cannot use, and reporting that as a success persists a
+		// window-less reading which then serves as the cache.
+		if h := rateLimitHeaders(raw.Header); len(parseWindows(h)) > 0 {
 			return h, used, nil
 		}
 	}
@@ -172,7 +176,7 @@ func percentUsed(v string) string {
 	if err != nil {
 		return v
 	}
-	return strconv.FormatFloat(f*100, 'f', -1, 64) + "% used"
+	return strconv.FormatFloat(f*100, 'f', 0, 64) + "% used"
 }
 
 // formatReset renders a reset header (unix seconds or RFC3339) as a local time plus time left.
