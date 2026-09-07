@@ -226,7 +226,25 @@ Install refuses to overwrite a real file at the link path. Uninstall removes the
 entry and the link, and never a real file. Set `CLAUDE_CONFIG_DIR` to work on a
 different settings file.
 
-Checks are at most one per 6 minutes, and a cached check costs about 20ms.
+How often a check runs scales with usage. The guard remembers what the last
+check saw and picks the next wait from it, on a quadratic ramp between
+`CLUSAGE_GUARD_INTERVAL` and `CLUSAGE_GUARD_INTERVAL_MIN`. Each window counts
+against its own threshold, and the closer of the two drives the wait:
+
+| 5h | 7d | Next check |
+|---|---|---|
+| 10% | 5% | 297s |
+| 50% | 20% | 217s |
+| 80% | 40% | 87s |
+| 89% | 20% | 36s |
+| 90% | 20% | 30s |
+| 20% | 90% | 58s |
+
+The ramp stays slow while there is headroom, because every check spends real
+usage. It falls to 30s near a threshold, where overshooting into overage costs
+more than the probes do. Run `bash clusage-guard.sh --interval <5h> <7d>` to
+print the wait for any pair. Set both bounds to the same number for a fixed
+interval. A cached check costs about 20ms.
 
 ### Guard rail settings
 
@@ -237,7 +255,8 @@ Every threshold is an environment variable, so no config file is needed:
 | `CLUSAGE_GUARD_DISABLE` | `0` | Set to `1` to turn the guard off. |
 | `CLUSAGE_GUARD_5H` | `90` | Soft threshold, percent. Pause and poll. |
 | `CLUSAGE_GUARD_7D` | `95` | Hard threshold, percent. Deny without polling. |
-| `CLUSAGE_GUARD_INTERVAL` | `360` | Seconds between checks while under the soft threshold. |
+| `CLUSAGE_GUARD_INTERVAL` | `300` | Seconds between checks at low usage. |
+| `CLUSAGE_GUARD_INTERVAL_MIN` | `30` | Seconds between checks at a threshold. |
 | `CLUSAGE_GUARD_POLL` | `15` | Seconds between checks while paused. |
 | `CLUSAGE_GUARD_MAXWAIT` | `45` | Deny after pausing this long. |
 | `CLUSAGE_GUARD_ALLOW_OVERAGE` | `0` | Set to `1` to keep working once a window is exhausted. |

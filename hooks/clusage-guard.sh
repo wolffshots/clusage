@@ -12,14 +12,16 @@
 # Register it with `clusage hook install`, or run this script directly with
 # --install. Install links the script into the Claude Code hooks directory and
 # names that link in settings.json, so an upgrade of clusage upgrades the hook.
-# Run --status to see the current state, --uninstall to remove it.
+# Run --status to see the current state, --uninstall to remove it. Run
+# --interval <5h percent> <7d percent> to print the wait the ramp picks.
 #
 # Config (environment):
 #   CLUSAGE_GUARD_DISABLE=1     turn the guard off
 #   CLUSAGE_RESUME_DISABLE=1    turn the resume report off
 #   CLUSAGE_GUARD_5H=90         soft threshold, percent, pause and poll
 #   CLUSAGE_GUARD_7D=95         hard threshold, percent, deny without polling
-#   CLUSAGE_GUARD_INTERVAL=360  seconds between checks while under threshold
+#   CLUSAGE_GUARD_INTERVAL=300  seconds between checks at low usage
+#   CLUSAGE_GUARD_INTERVAL_MIN=30  seconds between checks near a threshold
 #   CLUSAGE_GUARD_POLL=15       seconds between checks while paused
 #   CLUSAGE_GUARD_MAXWAIT=45    deny after pausing this long
 #   CLUSAGE_GUARD_ALLOW_OVERAGE=1  work on even when a window is exhausted
@@ -31,7 +33,8 @@ set -uo pipefail
 
 SOFT=${CLUSAGE_GUARD_5H:-90}
 HARD=${CLUSAGE_GUARD_7D:-95}
-INTERVAL=${CLUSAGE_GUARD_INTERVAL:-360}
+INTERVAL=${CLUSAGE_GUARD_INTERVAL:-300}
+INTERVAL_MIN=${CLUSAGE_GUARD_INTERVAL_MIN:-30}
 POLL=${CLUSAGE_GUARD_POLL:-15}
 # A hook that blocks for minutes makes the Claude Code session look dead, and
 # the app kills it. Wait only for a short spike, then hand the decision back.
@@ -46,6 +49,43 @@ SELF=${BASH_SOURCE[0]}
 CLAUDE_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 LINK="$CLAUDE_DIR/hooks/clusage-guard.sh"
 OFF="$CLAUDE_DIR/clusage-guard.off"
+
+# --- the poll interval ------------------------------------------------------
+
+# interval_for <5h percent> <7d percent>. Seconds to wait before the next
+# check. Each window is measured against its own cut, and the closer of the two
+# drives the wait. The ramp is quadratic, so it stays near INTERVAL while there
+# is headroom and falls to INTERVAL_MIN at the cut. Every probe spends real
+# usage, so a slow ramp at low usage is the point.
+#
+# A percent that is missing, negative or not a number reads as no load, which
+# gives the longest wait.
+#
+# ponytail: a percent is a level, not a rate. Burn rate over the stored
+# readings would give the honest wait of headroom divided by burn. Upgrade to
+# that once clusage exposes a rate.
+interval_for() {
+  awk -v f="${1:--1}" -v v="${2:--1}" -v s="$SOFT" -v h="$HARD" \
+      -v hi="$INTERVAL" -v lo="$INTERVAL_MIN" 'BEGIN {
+    if (hi + 0 <= 0) { print 0; exit }   # zero means check every call
+    if (lo + 0 < 0) lo = 0
+    if (lo + 0 > hi + 0) lo = hi         # a floor above the ceiling is a typo
+    a = (s + 0 > 0) ? (f + 0) / s : 0
+    b = (h + 0 > 0) ? (v + 0) / h : 0
+    x = (a > b) ? a : b
+    if (x < 0) x = 0
+    if (x > 1) x = 1
+    n = int(hi - (hi - lo) * x * x + 0.5)
+    print (n < 1) ? 1 : n
+  }'
+}
+
+# mark <5h percent> <7d percent>. Records when the last check ran and what it
+# saw, so the next call sizes its own wait from the same numbers. An older
+# stamp holds the time alone, which reads as no load.
+mark() {
+  printf '%s %s %s\n' "$(date +%s)" "${1:--1}" "${2:--1}" > "$STATE"
+}
 
 # --- registration -----------------------------------------------------------
 
@@ -172,8 +212,9 @@ case "${1:-}" in
   --uninstall) manage uninstall && unlink_hook; exit $? ;;
   --status)    [[ -e "$OFF" ]] && echo "off switch present: $OFF"
                manage status; exit $? ;;
+  --interval)  interval_for "${2:-}" "${3:-}"; exit 0 ;;
   "") ;;
-  *) echo "clusage-guard: unknown flag $1 (want: --install, --uninstall, --status)" >&2; exit 1 ;;
+  *) echo "clusage-guard: unknown flag $1 (want: --install, --uninstall, --status, --interval)" >&2; exit 1 ;;
 esac
 
 # --- the resume report ------------------------------------------------------
@@ -261,17 +302,26 @@ read_usage() {
 # win <table> <window prefix>. "<percent>|<status>|<reset>" for the highest
 # matching window. The percent is -1 when nothing matched. The reset is the
 # text from the "resets" field to the end of the line, and is empty when the
-# window reported none.
+# window reported none. An exhausted status wins over the one on the highest
+# row, because a sibling window such as 7d-opus can be spent at a low percent.
 win() {
   awk -v p="$2" '$1 ~ "^"p && $2 ~ /%$/ {
+    t = ($4 == "resets" ? "" : $4)
+    if (x == "" && t != "" && t !~ /^allowed/) x = t
     if (m == "" || $2+0 > m) {
-      m = $2+0; s = ($4 == "resets" ? "" : $4); r = ""
+      m = $2+0; s = t; r = ""
       for (i = 4; i <= NF; i++) if ($i == "resets") {
         for (j = i; j <= NF; j++) r = r (j > i ? " " : "") $j
         break
       }
     }
-  } END { printf "%s|%s|%s\n", (m == "" ? -1 : m), s, r }' <<<"$1"
+  } END { printf "%s|%s|%s\n", (m == "" ? -1 : m), (x == "" ? s : x), r }' <<<"$1"
+}
+
+# ge <a> <b>. True when a is at least b. A percent can carry a fraction, and
+# bash arithmetic reads that as a syntax error and then compares nothing.
+ge() {
+  awk -v a="$1" -v b="$2" 'BEGIN { exit !(a+0 >= b+0) }'
 }
 
 # spent <win>. True when the window reported a status that is not an allowed
@@ -281,19 +331,35 @@ spent() {
   [[ -n "$s" && "$s" != allowed* ]]
 }
 
+# check <cache-minutes>. One decision line:
+#
+#   verdict|window|percent|status|5h percent|7d percent|reset
+#
+# The verdict, the window it names and that window's own fields come first. The
+# two raw percents follow, because the caller sizes its next wait from both,
+# whichever window tripped. The reset text holds spaces, so it stays last for
+# the reader to absorb. Nothing is printed when clusage is unavailable.
 check() {
-  local table five seven
+  local table five seven verdict=OK name=5h w pct status reset
   table=$(read_usage "$1")
   [[ -z "$table" ]] && return 0   # clusage unavailable, fail open
   five=$(win "$table" "5h")
   seven=$(win "$table" "7d")
   if [[ "${CLUSAGE_GUARD_ALLOW_OVERAGE:-0}" != 1 ]]; then
-    spent "$five" && { echo "SPENT|5h|$five"; return 0; }
-    spent "$seven" && { echo "SPENT|7d|$seven"; return 0; }
+    if spent "$five"; then verdict=SPENT
+    elif spent "$seven"; then verdict=SPENT name=7d
+    fi
   fi
-  if (( ${seven%%|*} >= HARD )); then echo "HARD|7d|$seven"; return 0; fi
-  if (( ${five%%|*} >= SOFT )); then echo "SOFT|5h|$five"; return 0; fi
-  echo "OK|5h|$five"
+  if [[ "$verdict" == OK ]]; then
+    if ge "${seven%%|*}" "$HARD"; then verdict=HARD name=7d
+    elif ge "${five%%|*}" "$SOFT"; then verdict=SOFT
+    fi
+  fi
+  w=$five
+  [[ "$name" == 7d ]] && w=$seven
+  IFS='|' read -r pct status reset <<<"$w"
+  printf '%s|%s|%s|%s|%s|%s|%s\n' "$verdict" "$name" "$pct" "$status" \
+    "${five%%|*}" "${seven%%|*}" "$reset"
 }
 
 # retry <window> <reset>. Tells the caller when to come back.
@@ -325,16 +391,29 @@ print(d.get("tool_name", "") if isinstance(d, dict) else "")' 2>/dev/null
 }
 
 now=$(date +%s)
-last=0
-[[ -f "$STATE" ]] && last=$(cat "$STATE" 2>/dev/null || echo 0)
-(( now - last < INTERVAL )) && exit 0
+last=0 pfive=-1 pseven=-1
+if [[ -f "$STATE" ]]; then
+  # "<unix time> <5h percent> <7d percent>". An older build wrote the time
+  # alone, and a truncated write leaves nothing usable, so each field is taken
+  # only when it reads as one.
+  ts="" p5="" p7=""
+  read -r ts p5 p7 < "$STATE" 2>/dev/null
+  [[ "$ts" =~ ^[0-9]+$ ]] && last=$ts
+  [[ -n "$p5" ]] && pfive=$p5
+  [[ -n "$p7" ]] && pseven=$p7
+fi
+interval=$(interval_for "$pfive" "$pseven")
+(( now - last < interval )) && exit 0
 
 tool=$(tool_name "$payload")
 for allowed in $ALLOW_TOOLS; do
   [[ "$tool" == "$allowed" ]] && exit 0
 done
 
-IFS='|' read -r verdict name value status reset <<<"$(check 5)"
+# A probe older than the wait it just sized would report a stale number, so the
+# reading cache tracks the interval. Under a minute this floors to zero, which
+# is what a fast poll needs.
+IFS='|' read -r verdict name value status pfive pseven reset <<<"$(check $((interval / 60)))"
 
 if [[ "$verdict" == "SPENT" ]]; then
   stop "$name" "$status"
@@ -349,7 +428,7 @@ if [[ "$verdict" == "SOFT" ]]; then
   while (( waited < MAXWAIT )); do
     sleep "$POLL"
     waited=$(( waited + POLL ))
-    IFS='|' read -r verdict name value status reset <<<"$(check 0)"
+    IFS='|' read -r verdict name value status pfive pseven reset <<<"$(check 0)"
     if [[ "$verdict" == "SPENT" ]]; then
       stop "$name" "$status"
     fi
@@ -358,12 +437,12 @@ if [[ "$verdict" == "SOFT" ]]; then
     fi
     if [[ "$verdict" == "OK" ]]; then
       echo "clusage guard rail: 5h usage back down to ${value}%, work resumed after ${waited}s." >&2
-      date +%s > "$STATE"
+      mark "$pfive" "$pseven"
       exit 0
     fi
   done
   deny "clusage guard rail: the 5h limit is at ${value}% and did not drop in ${MAXWAIT}s (soft limit ${SOFT}%). $(retry 5h "$reset")"
 fi
 
-date +%s > "$STATE"
+mark "$pfive" "$pseven"
 exit 0

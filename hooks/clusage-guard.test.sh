@@ -52,6 +52,20 @@ edge="5h  90% used  allowed
 7d  95% used  allowed"
 run "$edge" deny "7d limit is at 95%"
 
+# a percent can carry a fraction, which bash arithmetic cannot read
+frac7="5h  33% used  allowed
+7d  95.5% used  allowed_warning"
+run "$frac7" deny "7d limit is at 95.5%"
+
+frac5="5h  90.5% used  allowed_warning
+7d  20% used  allowed"
+run "$frac5" deny "5h limit is at 90.5%"
+
+# just under the hard cut, so a fraction must not round up into a deny
+under7="5h  33% used  allowed
+7d  94.5% used  allowed_warning"
+run "$under7" allow
+
 soft_edge="5h  90% used  allowed
 7d  20% used  allowed"
 run "$soft_edge" deny "5h limit is at 90%"
@@ -106,6 +120,124 @@ else
 fi
 
 rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+
+# --- the poll interval ------------------------------------------------------
+
+iv() { # iv <5h percent> <7d percent> <expect seconds>
+  got=$(bash "$GUARD" --interval "$1" "$2" 2>/dev/null)
+  [[ "$got" == "$3" ]] && { pass=$((pass+1)); return; }
+  fail=$((fail+1)); echo "FAIL: interval $1/$2 expected $3, got ${got:-<empty>}"
+}
+
+# the ramp is quadratic in the closer window, over the 90/95 defaults
+iv 0 0 300
+iv 10 5 297
+iv 50 20 217
+iv 70 30 137
+iv 89 20 36
+iv 90 20 30
+iv 100 20 30
+# the 7d window drives the wait when it is the closer of the two to its cut
+iv 20 90 58
+iv 20 95 30
+# a missing or unreadable percent reads as no load
+iv -1 -1 300
+iv abc abc 300
+iv "" "" 300
+
+# a floor above the ceiling is a typo, so the ceiling wins
+got=$(CLUSAGE_GUARD_INTERVAL=60 CLUSAGE_GUARD_INTERVAL_MIN=900 \
+      bash "$GUARD" --interval 10 5)
+[[ "$got" == 60 ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: floor above ceiling, got $got"; }
+# a zero ceiling still means check on every call
+got=$(CLUSAGE_GUARD_INTERVAL=0 bash "$GUARD" --interval 10 5)
+[[ "$got" == 0 ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: zero ceiling, got $got"; }
+# equal bounds give back the old fixed interval
+got=$(CLUSAGE_GUARD_INTERVAL=360 CLUSAGE_GUARD_INTERVAL_MIN=360 \
+      bash "$GUARD" --interval 88 20)
+[[ "$got" == 360 ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: equal bounds, got $got"; }
+
+# --- the stamp gate ---------------------------------------------------------
+
+STAMP="${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+
+gate() { # gate <stamp contents> <expect: probe|skip> <label>
+  # high7 denies every call, so a probe shows as output and a skip as silence.
+  printf '%s\n' "$high7" > "$TMP/fx"
+  if [[ "$1" == "-" ]]; then rm -f "$STAMP"; else printf '%s\n' "$1" > "$STAMP"; fi
+  out=$(CLUSAGE_GUARD_FIXTURE="$TMP/fx" bash "$GUARD" </dev/null 2>/dev/null)
+  if [[ "$2" == probe ]]; then
+    [[ "$out" == *'"deny"'* ]] && { pass=$((pass+1)); return; }
+  else
+    [[ -z "$out" ]] && { pass=$((pass+1)); return; }
+  fi
+  fail=$((fail+1)); echo "FAIL: gate $3 expected $2, got: ${out:-<empty>}"
+}
+
+age() { echo $(( $(date +%s) - $1 )); }
+
+# 10 percent waits about 297s, so a check 100s old still holds
+gate "$(age 100) 10 5" skip "low usage, recent check"
+# 90 percent waits 30s, so the same age must probe again
+gate "$(age 100) 90 20" probe "high usage, recent check"
+# the 7d window drives the wait on its own
+gate "$(age 100) 20 92" probe "high 7d, recent check"
+# a stamp older than the longest wait always probes
+gate "$(age 400) 10 5" probe "low usage, stale check"
+# a stamp from the older build holds the time alone, which reads as no load
+gate "$(age 100)" skip "old stamp format"
+gate "$(age 400)" probe "old stamp format, stale"
+# nothing usable in the stamp means check now
+gate "garbage" probe "unreadable stamp"
+gate "" probe "empty stamp"
+gate "-" probe "no stamp"
+
+# an allowed call records both percents, so the next call can size its wait
+rm -f "$STAMP"
+printf '%s\n' "$low" > "$TMP/fx"
+CLUSAGE_GUARD_FIXTURE="$TMP/fx" bash "$GUARD" </dev/null >/dev/null 2>&1
+read -r _ sfive sseven < "$STAMP"
+[[ "$sfive" == 33 && "$sseven" == 20 ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: stamp percents, got 5h=$sfive 7d=$sseven"; }
+
+# the reading cache tracks the wait, so a fast poll never reads a stale probe
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/clusage" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ARGLOG"
+cat "$FX"
+EOF
+chmod +x "$TMP/bin/clusage"
+export ARGLOG="$TMP/args" FX="$TMP/fx"
+
+: > "$ARGLOG"
+printf '%s\n' "$low" > "$TMP/fx"
+printf '%s\n' "$(age 400) 10 5" > "$STAMP"
+PATH="$TMP/bin:$PATH" bash "$GUARD" </dev/null >/dev/null 2>&1
+[[ "$(cat "$ARGLOG")" == "usage -threshold 4" ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: cache minutes at low usage, got $(cat "$ARGLOG")"; }
+
+# near the soft cut the wait is under a minute, so the probe must be live
+: > "$ARGLOG"
+printf '%s\n' "$(age 400) 89 20" > "$STAMP"
+PATH="$TMP/bin:$PATH" bash "$GUARD" </dev/null >/dev/null 2>&1
+[[ "$(cat "$ARGLOG")" == "usage -threshold 0" ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: cache minutes near the cut, got $(cat "$ARGLOG")"; }
+
+# every poll during a pause reads a live number
+: > "$ARGLOG"
+printf '%s\n' "$high5" > "$TMP/fx"
+rm -f "$STAMP"
+PATH="$TMP/bin:$PATH" CLUSAGE_GUARD_POLL=1 CLUSAGE_GUARD_MAXWAIT=2 \
+  bash "$GUARD" </dev/null >/dev/null 2>&1
+[[ "$(sed -n '2,$p' "$ARGLOG" | sort -u)" == "usage -threshold 0" ]] \
+  && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: pause polls not live, got $(cat "$ARGLOG")"; }
+unset ARGLOG FX
+rm -f "$STAMP"
 
 # --- the resume report ------------------------------------------------------
 
