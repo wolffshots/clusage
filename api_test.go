@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -103,4 +106,81 @@ func TestFetchUsageKeepsHeadersWhenAWindowParses(t *testing.T) {
 	if len(parseWindows(headers)) != 1 {
 		t.Fatalf("fetchUsage() headers = %v, want one parsable window", headers)
 	}
+}
+
+func TestRateLabel(t *testing.T) {
+	if got := rateLabel(14.23, true); got != "14.2%/h" {
+		t.Fatalf("rateLabel = %q", got)
+	}
+	if got := rateLabel(0, true); got != "0.0%/h" {
+		t.Fatalf("a zero rate must still render: %q", got)
+	}
+	// A negative rate is nonsense to show, so clamp it.
+	if got := rateLabel(-5, true); got != "0.0%/h" {
+		t.Fatalf("a negative rate must clamp to zero: %q", got)
+	}
+	// An unknown rate leaves the column blank, which the hook reads as unknown.
+	if got := rateLabel(0, false); got != "" {
+		t.Fatalf("an unknown rate must render empty: %q", got)
+	}
+}
+
+func TestReportPutsTheRateBeforeTheReset(t *testing.T) {
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	pts := []ratePoint{
+		{at: now.Add(-20 * time.Minute), frac: 0.30},
+		{at: now.Add(-10 * time.Minute), frac: 0.32},
+		{at: now.Add(-1 * time.Minute), frac: 0.33},
+	}
+	hist := readingsFrom("5h", pts)
+	latest := hist[len(hist)-1]
+	latest.Headers["anthropic-ratelimit-unified-5h-reset"] =
+		strconv.FormatInt(now.Add(2*time.Hour).Unix(), 10)
+
+	out := captureStdout(t, func() { report(latest, hist, now, true, false) })
+	fields := strings.Fields(strings.Split(out, "\n")[0])
+	// name, percent, "used", status, rate, then the reset text.
+	if len(fields) < 6 {
+		t.Fatalf("too few fields: %q", out)
+	}
+	if fields[0] != "5h" || fields[3] != "allowed" {
+		t.Fatalf("the hook reads $1 and $4, which moved: %q", out)
+	}
+	if !strings.HasSuffix(fields[4], "%/h") {
+		t.Fatalf("want the rate in field 5, got %q in %q", fields[4], out)
+	}
+	if fields[5] != "resets" {
+		t.Fatalf("the reset text must follow the rate: %q", out)
+	}
+}
+
+func TestReportLeavesTheColumnBlankWithoutHistory(t *testing.T) {
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	r := Reading{FetchedAt: now, Model: "claude-opus-5", Headers: map[string]string{
+		"anthropic-ratelimit-unified-5h-utilization": "0.33",
+		"anthropic-ratelimit-unified-5h-status":      "allowed",
+	}}
+	out := captureStdout(t, func() { report(r, []Reading{r}, now, false, false) })
+	if strings.Contains(out, "%/h") {
+		t.Fatalf("one reading supports no rate, so the column must be blank: %q", out)
+	}
+}
+
+// captureStdout runs fn with os.Stdout redirected and returns what it printed.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = wr
+	fn()
+	wr.Close()
+	os.Stdout = old
+	out, err := io.ReadAll(rd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
 }

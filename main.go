@@ -113,8 +113,14 @@ func usage(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The rate column needs history. Seven days covers the longest window's
+	// smoothing horizon, and these rows are small.
+	hist, err := readingsSince(db, now.Add(-7*24*time.Hour))
+	if err != nil {
+		return err
+	}
 	if ok && !*force && now.Sub(last.FetchedAt) < time.Duration(*threshold)*time.Minute {
-		report(last, now, true, *verbose)
+		report(last, hist, now, true, *verbose)
 		return nil
 	}
 
@@ -135,7 +141,8 @@ func usage(args []string) error {
 	// The report goes out before the writes. The API call is already paid for,
 	// and the guard rail hook reads this output, so a failed write must not
 	// swallow the numbers.
-	report(r, time.Now(), false, *verbose)
+	// The new reading is saved further down, so add it here for the rate.
+	report(r, append(hist, r), time.Now(), false, *verbose)
 	if err := saveReading(db, r); err != nil {
 		fmt.Fprintln(os.Stderr, "clusage: save reading:", err)
 	}
@@ -155,10 +162,15 @@ func usage(args []string) error {
 	return nil
 }
 
-func report(r Reading, now time.Time, cached bool, verbose bool) {
+func report(r Reading, hist []Reading, now time.Time, cached bool, verbose bool) {
 	for _, w := range parseWindows(r.Headers) {
-		line := fmt.Sprintf("%-9s%-11s%-18s%s",
-			w.Name, percentUsed(w.Utilization), w.Status, formatReset(w.Reset, now))
+		rate, ok := burnRate(hist, w.Name, now)
+		// The rate column sits between the status and the reset text. The
+		// guard rail hook reads $1, $2 and $4 and then searches for "resets",
+		// so a field added here moves nothing it depends on.
+		line := fmt.Sprintf("%-9s%-11s%-18s%-10s%s",
+			w.Name, percentUsed(w.Utilization), w.Status, rateLabel(rate, ok),
+			formatReset(w.Reset, now))
 		fmt.Println(strings.TrimRight(line, " "))
 	}
 	if verbose {

@@ -179,6 +179,18 @@ func percentUsed(v string) string {
 	return strconv.FormatFloat(f*100, 'f', 0, 64) + "% used"
 }
 
+// rateLabel renders a burn rate for the usage table. An unknown rate renders
+// empty, which the guard rail hook reads as unknown and falls back on.
+func rateLabel(v float64, ok bool) string {
+	if !ok {
+		return ""
+	}
+	if v < 0 {
+		v = 0
+	}
+	return strconv.FormatFloat(v, 'f', 1, 64) + "%/h"
+}
+
 // formatReset renders a reset header (unix seconds or RFC3339) as a local time plus time left.
 func formatReset(v string, now time.Time) string {
 	if v == "" {
