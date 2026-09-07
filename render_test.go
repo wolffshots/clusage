@@ -156,3 +156,74 @@ func TestNowViewWithoutHistoryShowsADash(t *testing.T) {
 		t.Fatalf("one reading supports no rate, want a dash:\n%s", out)
 	}
 }
+
+func TestSustainableRate(t *testing.T) {
+	// A 5h window spends 100 points over 5 hours, so 20 points per hour.
+	if got := sustainableRate("5h"); got < 19.99 || got > 20.01 {
+		t.Fatalf("sustainableRate(5h) = %v; want 20", got)
+	}
+	// A 7d window sustains a much slower rate.
+	if got := sustainableRate("7d"); got < 0.59 || got > 0.6 {
+		t.Fatalf("sustainableRate(7d) = %v; want about 0.595", got)
+	}
+	// A window with no length falls back to the 5h figure.
+	if sustainableRate("overage") != sustainableRate("5h") {
+		t.Fatal("a nameless window must fall back to the 5h rate")
+	}
+}
+
+func TestRateBand(t *testing.T) {
+	s := sustainableRate("5h") // 20
+	if got := rateBand(5, s); got != 0 {
+		t.Fatalf("below sustainable must be band 0, got %d", got)
+	}
+	if got := rateBand(30, s); got != 1 {
+		t.Fatalf("under twice sustainable must be band 1, got %d", got)
+	}
+	if got := rateBand(90, s); got != 2 {
+		t.Fatalf("above twice sustainable must be band 2, got %d", got)
+	}
+	// A rate of zero is the calmest possible reading.
+	if got := rateBand(0, s); got != 0 {
+		t.Fatalf("zero must be band 0, got %d", got)
+	}
+}
+
+func TestHistoryViewShowsTheRateChart(t *testing.T) {
+	hist := seedReadings(24)
+	m := model{
+		width:   100,
+		latest:  hist[len(hist)-1],
+		hasData: true,
+		history: hist,
+		cfg:     defaultConfig,
+	}
+	out := m.historyView(40)
+	if !strings.Contains(out, "%/h") {
+		t.Fatalf("historyView shows no rate chart:\n%s", out)
+	}
+	if !strings.Contains(out, "utilization") {
+		t.Fatalf("historyView lost the utilization chart:\n%s", out)
+	}
+}
+
+func TestHistoryViewDegradesOnAShortTerminal(t *testing.T) {
+	hist := seedReadings(24)
+	m := model{
+		width:   100,
+		latest:  hist[len(hist)-1],
+		hasData: true,
+		history: hist,
+		cfg:     defaultConfig,
+	}
+	for _, height := range []int{8, 12, 40} {
+		out := m.historyView(height)
+		if lines := strings.Count(out, "\n") + 1; lines > height {
+			t.Fatalf("height %d produced %d lines, which pushes the footer off screen",
+				height, lines)
+		}
+		if !strings.Contains(out, "utilization") {
+			t.Fatalf("height %d lost the utilization chart:\n%s", height, out)
+		}
+	}
+}

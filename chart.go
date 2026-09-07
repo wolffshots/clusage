@@ -139,5 +139,14 @@ func pct(frac float64) string {
 	return strconv.Itoa(int(frac*100+0.5)) + "%"
 }
 
+// pctPerHour labels a burn rate axis, trimming the decimal on a large value so
+// the label fits the 4 column gutter.
+func pctPerHour(v float64) string {
+	if v >= 10 {
+		return strconv.FormatFloat(v, 'f', 0, 64)
+	}
+	return strconv.FormatFloat(v, 'f', 1, 64)
+}
+
 // itoa is strconv.Itoa under a shorter name, for the many inline count labels.
 func itoa(n int) string { return strconv.Itoa(n) }

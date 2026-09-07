@@ -90,6 +90,56 @@ func colorCols(row string, cols []float64) string {
 	return b.String()
 }
 
+// sustainableRate is the burn rate that spends a window exactly over its own
+// length, in percent per hour. A 5h window sustains 20 points per hour. A rate
+// above this runs the window out early.
+func sustainableRate(name string) float64 {
+	length, ok := windowLength(name)
+	if !ok {
+		length = defaultWindowLength
+	}
+	return 100 / length.Hours()
+}
+
+// rateBand is the band a burn rate falls in: 0 at or under the sustainable
+// rate, 1 under twice it, 2 above. It keys on the sustainable rate rather than
+// on projected time to exhaustion, because a resampled chart column no longer
+// pairs with a utilization value.
+func rateBand(rate, sustainable float64) int {
+	switch {
+	case rate <= sustainable:
+		return 0
+	case rate <= 2*sustainable:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// colorRateCols paints a rate chart row one column at a time, the way
+// colorCols paints a utilization row, but banding by the sustainable rate
+// rather than by the utilization thresholds. Neighbouring columns in the same
+// band share one escape sequence, exactly as colorCols does.
+func colorRateCols(row string, cols []float64, sustainable float64) string {
+	runes := []rune(row)
+	band := func(i int) int {
+		if i >= len(cols) {
+			return 0
+		}
+		return rateBand(cols[i], sustainable)
+	}
+	var b strings.Builder
+	for i := 0; i < len(runes); {
+		j := i + 1
+		for j < len(runes) && band(j) == band(i) {
+			j++
+		}
+		b.WriteString(loadBands[band(i)].Render(string(runes[i:j])))
+		i = j
+	}
+	return b.String()
+}
+
 // contentWidth is the usable width for a chart, leaving room for the y-axis
 // labels and a little breathing space.
 func contentWidth(total, reserve int) int {
@@ -217,9 +267,29 @@ func (m model) historyView(height int) string {
 	}
 
 	chartW := contentWidth(m.width, 10)
-	// Leave rows for the title, the x-axis line, the summary, and the other
-	// windows' sparklines, so the chart never pushes the footer off screen.
-	chartH := height - 5 - len(wins)
+	// Rows for the title, the x-axis line, the summary, and the other windows'
+	// sparklines, so the chart never pushes the footer off screen.
+	budget := height - 5 - len(wins)
+	budget = clamp(budget, 3, 22)
+
+	rateVals, _ := rateSeries(m.history, sel.Name)
+	// The rate chart costs 3 chart rows plus 1 axis row. Above 7 rows of
+	// budget both charts fit, and utilization takes the larger half. Between 4
+	// and 6 the rate falls back to one sparkline row. Under 4 it is dropped.
+	chartH, rateH := budget, 0
+	switch {
+	case len(rateVals) == 0:
+		// nothing to draw
+	case budget >= 7:
+		rateH = budget / 3
+		if rateH < 4 {
+			rateH = 4
+		}
+		chartH = budget - rateH
+	case budget >= 4:
+		rateH = 1
+		chartH = budget - 1
+	}
 	chartH = clamp(chartH, 3, 16)
 
 	style := loadStyle(series[len(series)-1])
@@ -246,11 +316,48 @@ func (m model) historyView(height int) string {
 	}
 	b.WriteString(strings.Repeat(" ", 5) + dimStyle.Render(xAxis(stamps, chartW)) + "\n\n")
 
+	// Both branches below run only when rateVals is non-empty, because the
+	// switch above leaves rateH at 0 otherwise. bounds() indexes vs[0] and
+	// panics on an empty slice, so that guard matters.
+	if rateH >= 4 {
+		sust := sustainableRate(sel.Name)
+		// areaChart scales between lo and hi, and falls back to a span of 1
+		// when hi-lo is not positive. A rate has no natural ceiling, so take
+		// the top from the data. A flat zero series gives top 0, which lands
+		// on that span-of-1 fallback and draws an empty chart, which is
+		// correct for a window that is not draining.
+		_, top := bounds(rateVals)
+		rows, cols := areaChart(rateVals, chartW, rateH-1, 0, top)
+		for i, row := range rows {
+			axis := ""
+			switch i {
+			case 0:
+				axis = pctPerHour(top)
+			case len(rows) - 1:
+				axis = "0"
+			}
+			b.WriteString(dimStyle.Render(padLeft(axis, 4)) + " " +
+				colorRateCols(row, cols, sust) + "\n")
+		}
+		b.WriteString(strings.Repeat(" ", 5) +
+			dimStyle.Render("burn rate, %/h") + "\n\n")
+	} else if rateH == 1 {
+		sust := sustainableRate(sel.Name)
+		glyphs, cols := sparkline(rateVals, chartW)
+		b.WriteString("  " + dimStyle.Render(padRight("burn %/h", 10)) +
+			colorRateCols(glyphs, cols, sust) + "\n\n")
+	}
+
 	min, max := bounds(series)
 	b.WriteString(labelStyle.Render("  min ") + valueStyle.Render(pct(min)) +
 		labelStyle.Render("  max ") + valueStyle.Render(pct(max)) +
 		labelStyle.Render("  now ") + style.Render(pct(series[len(series)-1])) +
-		labelStyle.Render("  n=") + valueStyle.Render(itoa(len(series))) + "\n\n")
+		labelStyle.Render("  n=") + valueStyle.Render(itoa(len(series))))
+	if rate, ok := burnRate(m.history, sel.Name, time.Now()); ok {
+		b.WriteString(labelStyle.Render("  burn ") +
+			valueStyle.Render(strconv.FormatFloat(rate, 'f', 1, 64)+"%/h"))
+	}
+	b.WriteString("\n\n")
 
 	for _, w := range wins {
 		s, _ := utilSeries(m.history, w.Name)
