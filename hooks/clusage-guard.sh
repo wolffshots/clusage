@@ -394,6 +394,18 @@ check() {
     "${five%%|*}" "${seven%%|*}" "$(field 3 "$five")" "$(field 3 "$seven")" "$reset"
 }
 
+# trend <percent> <rate>. A clause naming the rate and when the window fills at
+# it. Prints nothing when the rate is unknown or not positive, so a table from
+# an older clusage produces the v0.8.0 message unchanged.
+trend() {
+  awk -v p="${1:--1}" -v r="${2:-0}" 'BEGIN {
+    if (r + 0 <= 0) exit
+    left = (100 - p) / r * 60
+    if (left < 0) left = 0
+    printf " It is rising at %.1f%%/h, so it fills in about %dm.", r, int(left + 0.5)
+  }'
+}
+
 # retry <window> <reset>. Tells the caller when to come back.
 retry() {
   if [[ -z "$2" ]]; then
@@ -465,7 +477,7 @@ if [[ "$verdict" == "SPENT" ]]; then
 fi
 
 if [[ "$verdict" == "HARD" ]]; then
-  deny "clusage guard rail: the 7d limit is at ${value}% (hard cut at ${HARD}%). $(retry 7d "$reset")"
+  deny "clusage guard rail: the 7d limit is at ${value}% (hard cut at ${HARD}%).$(trend "$value" "$rate7") $(retry 7d "$reset")"
 fi
 
 if [[ "$verdict" == "SOFT" ]]; then
@@ -478,7 +490,7 @@ if [[ "$verdict" == "SOFT" ]]; then
       stop "$name" "$status"
     fi
     if [[ "$verdict" == "HARD" ]]; then
-      deny "clusage guard rail: the 7d limit is at ${value}% (hard cut at ${HARD}%). $(retry 7d "$reset")"
+      deny "clusage guard rail: the 7d limit is at ${value}% (hard cut at ${HARD}%).$(trend "$value" "$rate7") $(retry 7d "$reset")"
     fi
     if [[ "$verdict" == "OK" ]]; then
       echo "clusage guard rail: 5h usage back down to ${value}%, work resumed after ${waited}s." >&2
@@ -486,7 +498,7 @@ if [[ "$verdict" == "SOFT" ]]; then
       exit 0
     fi
   done
-  deny "clusage guard rail: the 5h limit is at ${value}% and did not drop in ${MAXWAIT}s (soft limit ${SOFT}%). $(retry 5h "$reset")"
+  deny "clusage guard rail: the 5h limit is at ${value}% and did not drop in ${MAXWAIT}s (soft limit ${SOFT}%).$(trend "$value" "$rate5") $(retry 5h "$reset")"
 fi
 
 mark "$pfive" "$pseven" "$rate5" "$rate7"

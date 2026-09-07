@@ -320,6 +320,21 @@ PATH="$TMP/bin:$PATH" CLUSAGE_GUARD_POLL=1 CLUSAGE_GUARD_MAXWAIT=2 \
 unset ARGLOG FX
 rm -f "$STAMP"
 
+# --- the trend clause --------------------------------------------------------
+
+# a deny names the trend when the table carries a rate
+high5_rate="5h  94% used  allowed_warning  12.0%/h  resets Wed 19:30 (in 4h36m)
+7d  20% used  allowed  0.5%/h"
+run "$high5_rate" deny "rising at 12.0%/h"
+run "$high5_rate" deny "fills in about 30m"
+# with no rate in the table the clause is absent, exactly as v0.8.0
+run "$high5" deny "5h limit is at 94% and did not drop"
+out=$(printf '%s\n' "$high5" > "$TMP/fx"; rm -f "$STAMP"; \
+      CLUSAGE_GUARD_FIXTURE="$TMP/fx" CLUSAGE_GUARD_POLL=1 CLUSAGE_GUARD_MAXWAIT=2 \
+      bash "$GUARD" </dev/null 2>/dev/null)
+[[ "$out" != *"rising at"* ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: no rate must give no trend clause"; }
+
 # --- the resume report ------------------------------------------------------
 
 # The fixture below denies every tool call, so a payload that wrongly falls
