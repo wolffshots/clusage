@@ -116,7 +116,7 @@ func TestRateWalkIgnoresADuplicateTimestamp(t *testing.T) {
 	}
 }
 
-func TestRatePointsKeepsTheResetHeader(t *testing.T) {
+func TestRatePointsPullsOneWindow(t *testing.T) {
 	readings := []Reading{{
 		FetchedAt: time.Date(2026, 9, 7, 9, 0, 0, 0, time.UTC),
 		Headers: map[string]string{
@@ -126,7 +126,7 @@ func TestRatePointsKeepsTheResetHeader(t *testing.T) {
 		},
 	}}
 	got := ratePoints(readings, "5h")
-	if len(got) != 1 || got[0].frac != 0.61 || got[0].reset != "1787584800" {
+	if len(got) != 1 || got[0].frac != 0.61 {
 		t.Fatalf("ratePoints dropped a field: %+v", got)
 	}
 	// A reading with no utilization for that window contributes no point.
@@ -142,9 +142,6 @@ func readingsFrom(name string, pts []ratePoint) []Reading {
 		h := map[string]string{
 			"anthropic-ratelimit-unified-" + name + "-utilization": ftoa(p.frac),
 			"anthropic-ratelimit-unified-" + name + "-status":      "allowed",
-		}
-		if p.reset != "" {
-			h["anthropic-ratelimit-unified-"+name+"-reset"] = p.reset
 		}
 		out[i] = Reading{FetchedAt: p.at, Model: "claude-opus-5", Headers: h}
 	}

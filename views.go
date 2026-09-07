@@ -370,6 +370,11 @@ func (m model) historyView(height int) string {
 		labelStyle.Render("  now ") + style.Render(pct(series[len(series)-1])) +
 		labelStyle.Render("  n=") + valueStyle.Render(itoa(len(series))))
 	if rate, ok := burnRate(m.history, sel.Name, time.Now()); ok {
+		if rate < 0 {
+			// A small dip is accounting noise, not a refund. burnLabel and
+			// rateLabel clamp the same value, so this summary must too.
+			rate = 0
+		}
 		b.WriteString(labelStyle.Render("  burn ") +
 			valueStyle.Render(strconv.FormatFloat(rate, 'f', 1, 64)+"%/h"))
 	}

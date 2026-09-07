@@ -36,12 +36,20 @@ SOFT=${CLUSAGE_GUARD_5H:-90}
 HARD=${CLUSAGE_GUARD_7D:-95}
 INTERVAL=${CLUSAGE_GUARD_INTERVAL:-300}
 INTERVAL_MIN=${CLUSAGE_GUARD_INTERVAL_MIN:-30}
+# INTERVAL_MIN reaches a bash arithmetic context in the gate. Bash reads a
+# value that is not a number as a variable name there, and set -u makes an
+# unbound name fatal. The hook would then exit before it could deny. Fall back
+# to the default instead. INTERVAL needs no such guard, because it only ever
+# reaches awk, which coerces junk to zero.
+[[ "$INTERVAL_MIN" =~ ^[0-9]+$ ]] || INTERVAL_MIN=30
 POLL=${CLUSAGE_GUARD_POLL:-15}
 # A hook that blocks for minutes makes the Claude Code session look dead, and
 # the app kills it. Wait only for a short spike, then hand the decision back.
 MAXWAIT=${CLUSAGE_GUARD_MAXWAIT:-45}
 ALLOW_TOOLS=${CLUSAGE_GUARD_ALLOW_TOOLS:-"ScheduleWakeup CronCreate"}
-STATE="${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+# CLUSAGE_GUARD_STATE names the stamp file. The default path is shared by every
+# session on the machine, so the test suite points this at its own directory.
+STATE="${CLUSAGE_GUARD_STATE:-${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp}"
 # Absolute, but deliberately unresolved. The caller may name this script
 # through a stable path such as <brew prefix>/share/clusage/hooks, and
 # resolving it would bury a version number in the link that --install makes.
@@ -325,7 +333,9 @@ read_usage() {
 # row, because a sibling window such as 7d-opus can be spent at a low percent.
 win() {
   awk -v p="$2" '$1 ~ "^"p && $2 ~ /%$/ {
-    t = ($4 == "resets" ? "" : $4)
+    # A row with no status header puts the next field in $4. That is "resets"
+    # on a v0.8.0 table and the rate on a newer one, and neither is a status.
+    t = ($4 == "resets" || $4 ~ /%\/h$/) ? "" : $4
     if (x == "" && t != "" && t !~ /^allowed/) x = t
     if (m == "" || $2+0 > m) {
       m = $2+0; s = t; r = ""; b = ""

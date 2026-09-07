@@ -131,11 +131,17 @@ the API. Press `r` for a fresh reading.
 **Now** draws a gauge per limit window with its status and reset time. The
 color tracks load: green under 60%, amber under 85%, red at or above 85%.
 
-**Now** also shows `burn 14.2%/h   full in 4h43m` under each gauge. The
+**Now** also shows `burn 14.2%/h  full in 4h43m` under each gauge. The
 projection targets 100 percent, because the question a usage viewer answers is
 when the window is spent. The guard rail keeps its own thresholds in its own
 config, so the two never disagree by accident. A window with too little
 history reads `burn -`.
+
+The Now tab reads the burn rate from the history span you selected with `s`,
+which starts at 24h. `clusage usage` always reads 7 days. A short span holds
+fewer readings than the 7d window smooths over, so the Now tab can show a
+coarser 7d rate than `clusage usage`, or `burn -` where the command prints a
+number. Widen the span to compare the two.
 
 **History** graphs the selected window over the chosen span, with a sparkline
 per window underneath for comparison. The scale is fixed at 0 to 100% rather
@@ -176,9 +182,9 @@ clusage usage -threshold 15
 The table carries one row per window:
 
 ```text
-5h       61% used   allowed          14.2%/h   resets Wed 19:30 (in 4h36m)
-7d       41% used   allowed           0.9%/h   resets Mon 18:00 (in 123h6m)
-overage   0% used   allowed
+5h       61% used   allowed           14.2%/h   resets Wed 19:30 (in 4h36m)
+7d       41% used   allowed           0.9%/h    resets Mon 18:00 (in 123h6m)
+overage  0% used    allowed
 ```
 
 The `%/h` column is the burn rate: percent of that window consumed per hour. A

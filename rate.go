@@ -64,12 +64,11 @@ func tauFor(name string) time.Duration {
 	return length / tauDivisor
 }
 
-// ratePoint is one reading reduced to what a rate needs. The reset header
-// comes along so a caller can see where a window rolled over.
+// ratePoint is one reading reduced to what a rate needs. The reset header is
+// not carried, because resetDrop finds a rollover from the utilization alone.
 type ratePoint struct {
-	at    time.Time
-	frac  float64
-	reset string
+	at   time.Time
+	frac float64
 }
 
 // ratePoints pulls one window out of every reading, oldest first. A reading
@@ -82,7 +81,7 @@ func ratePoints(readings []Reading, name string) []ratePoint {
 				continue
 			}
 			if f, ok := w.utilFrac(); ok {
-				out = append(out, ratePoint{at: r.FetchedAt, frac: f, reset: w.Reset})
+				out = append(out, ratePoint{at: r.FetchedAt, frac: f})
 			}
 			break
 		}

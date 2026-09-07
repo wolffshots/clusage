@@ -7,9 +7,15 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 pass=0 fail=0
 
+# The guard writes its stamp to one shared path per user. Every Claude Code
+# session on this machine runs the guard, so a live session would race these
+# tests. Give this run its own stamp inside the throwaway directory.
+export CLUSAGE_GUARD_STATE="$TMP/stamp"
+STAMP="$CLUSAGE_GUARD_STATE"
+
 run() { # run <fixture-text> <expect: allow|deny> <expect-substring> [stdin-json]
   printf '%s\n' "$1" > "$TMP/fx"
-  rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+  rm -f "$STAMP"
   if [[ -n "${4:-}" ]]; then
     out=$(printf '%s' "$4" | CLUSAGE_GUARD_FIXTURE="$TMP/fx" CLUSAGE_GUARD_POLL=1 \
           CLUSAGE_GUARD_MAXWAIT=2 bash "$GUARD" 2>/dev/null)
@@ -85,9 +91,14 @@ burned="5h  100% used  rejected  resets Wed 19:30 (in 4h36m)
 overage 12% used allowed"
 run "$burned" deny "5h window is exhausted (status rejected)"
 
+# A row with no status header puts the rate in the status field. A rate is not
+# a status, so the window is not exhausted and the call goes through.
+no_status="5h  61% used              14.2%/h  resets Wed 19:30 (in 4h)"
+run "$no_status" allow ""
+
 # opting in drops back to the ordinary soft threshold path
 printf '%s\n' "$burned" > "$TMP/fx"
-rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+rm -f "$STAMP"
 out=$(CLUSAGE_GUARD_ALLOW_OVERAGE=1 CLUSAGE_GUARD_FIXTURE="$TMP/fx" CLUSAGE_GUARD_POLL=1 \
       CLUSAGE_GUARD_MAXWAIT=2 bash "$GUARD" </dev/null 2>/dev/null)
 [[ "$out" == *"5h limit is at 100% and did not drop"* ]] \
@@ -102,7 +113,7 @@ off="$TMP/off"
 mkdir -p "$off"
 : > "$off/clusage-guard.off"
 printf '%s\n' "$high7" > "$TMP/fx"
-rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+rm -f "$STAMP"
 out=$(CLAUDE_CONFIG_DIR="$off" CLUSAGE_GUARD_FIXTURE="$TMP/fx" bash "$GUARD" </dev/null 2>/dev/null)
 [[ -z "$out" ]] && pass=$((pass+1)) || { fail=$((fail+1)); echo "FAIL: off switch, got: $out"; }
 out=$(CLAUDE_CONFIG_DIR="$off" bash "$GUARD" --status 2>/dev/null)
@@ -112,7 +123,7 @@ rm -rf "$off"
 
 # resume path: paused at 84%, drops to 33% while polling
 printf '%s\n' "$high5" > "$TMP/fx"
-rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+rm -f "$STAMP"
 ( sleep 2; printf '%s\n' "$low" > "$TMP/fx" ) &
 out=$(CLUSAGE_GUARD_FIXTURE="$TMP/fx" CLUSAGE_GUARD_POLL=1 CLUSAGE_GUARD_MAXWAIT=10 \
       bash "$GUARD" </dev/null 2>"$TMP/err")
@@ -123,7 +134,7 @@ else
   fail=$((fail+1)); echo "FAIL: resume, out=${out:-<empty>} err=$(cat "$TMP/err")"
 fi
 
-rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+rm -f "$STAMP"
 
 # --- the poll interval ------------------------------------------------------
 
@@ -185,8 +196,6 @@ pj 30 -5 90 ""
 pj 95 30 90 ""
 
 # --- the stamp gate ---------------------------------------------------------
-
-STAMP="${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
 
 gate() { # gate <stamp contents> <expect: probe|skip> <label>
   # high7 denies every call, so a probe shows as output and a skip as silence.
@@ -263,6 +272,17 @@ out=$(CLUSAGE_GUARD_INTERVAL=60 CLUSAGE_GUARD_INTERVAL_MIN=900 \
       CLUSAGE_GUARD_FIXTURE="$TMP/fx" bash "$GUARD" </dev/null 2>/dev/null)
 [[ "$out" == *'"deny"'* ]] && pass=$((pass+1)) \
   || { fail=$((fail+1)); echo "FAIL: gate floor above ceiling expected probe, got: ${out:-<empty>}"; }
+
+# A floor that is not a number reaches the projection loop, where bash reads it
+# as a variable name and set -u kills the hook before it can deny. The stamp
+# carries a rate, so the loop runs. The guard must fall back to the default
+# floor and still deny, exactly as v0.8.0 does.
+printf '%s\n' "$high7" > "$TMP/fx"
+printf '%s\n' "$(age 400) 10 5 60 0" > "$STAMP"
+out=$(CLUSAGE_GUARD_INTERVAL_MIN=abc CLUSAGE_GUARD_FIXTURE="$TMP/fx" \
+      bash "$GUARD" </dev/null 2>/dev/null)
+[[ "$out" == *'"deny"'* ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: gate non-numeric floor expected deny, got: ${out:-<empty>}"; }
 
 # an allowed call records both percents, so the next call can size its wait
 rm -f "$STAMP"
@@ -352,7 +372,7 @@ run "$high7" deny "Do not decide it yourself"
 printf '%s\n' "$high7" > "$TMP/fx"
 
 resume() { # resume <payload> <expect-substring, empty for no output>
-  rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+  rm -f "$STAMP"
   out=$(printf '%s' "$1" | CLUSAGE_GUARD_FIXTURE="$TMP/fx" CLUSAGE_GUARD_POLL=1 \
         CLUSAGE_GUARD_MAXWAIT=2 bash "$GUARD" 2>/dev/null)
   if [[ -z "$2" ]]; then
@@ -388,7 +408,7 @@ out=$(printf '%s' "$stale" | CLUSAGE_RESUME_DISABLE=1 CLUSAGE_GUARD_FIXTURE="$TM
 
 # a tool call still reaches the guard rail, payload and all
 resume '{"hook_event_name":"PreToolUse","tool_name":"Bash"}' "7d limit is at 96%"
-rm -f "${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp"
+rm -f "$STAMP"
 
 # registration round trip against a throwaway CLAUDE_CONFIG_DIR
 cfg="$TMP/claude"
