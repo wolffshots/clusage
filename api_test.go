@@ -166,6 +166,66 @@ func TestReportLeavesTheColumnBlankWithoutHistory(t *testing.T) {
 	}
 }
 
+// TestLoadHistoryFallsBackOnReadFailure covers the readingsSince failure
+// path. A closed database gives a genuine readingsSince error, not a
+// simulated one. loadHistory must swallow it, warn on stderr in the style
+// of the other non-fatal save failures in usage(), and return no history
+// instead of an error, so usage() can still call report() on the cached
+// path. usage() itself now only ever calls readingsSince through
+// loadHistory, so this also covers the path usage() takes.
+func TestLoadHistoryFallsBackOnReadFailure(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	db, err := openDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close() // Any later query on db now fails.
+
+	stderr := captureStderr(t, func() {
+		hist := loadHistory(db, time.Now().Add(-7*24*time.Hour))
+		if hist != nil {
+			t.Fatalf("loadHistory on a closed database = %v, want nil", hist)
+		}
+	})
+	if !strings.Contains(stderr, "clusage:") {
+		t.Fatalf("a history read failure must warn like the other non-fatal saves: %q", stderr)
+	}
+
+	// The report must still print the window row and leave the rate column
+	// blank, exactly as it does for any other reading with no history.
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	r := Reading{FetchedAt: now, Model: "claude-opus-5", Headers: map[string]string{
+		"anthropic-ratelimit-unified-5h-utilization": "0.33",
+		"anthropic-ratelimit-unified-5h-status":      "allowed",
+	}}
+	out := captureStdout(t, func() { report(r, nil, now, true, false) })
+	if !strings.Contains(out, "5h") || !strings.Contains(out, "allowed") {
+		t.Fatalf("a history read failure must not swallow the window row: %q", out)
+	}
+	if strings.Contains(out, "%/h") {
+		t.Fatalf("no history means the rate column must be blank: %q", out)
+	}
+}
+
+// captureStderr runs fn with os.Stderr redirected and returns what it printed.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = wr
+	fn()
+	wr.Close()
+	os.Stderr = old
+	out, err := io.ReadAll(rd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
 // captureStdout runs fn with os.Stdout redirected and returns what it printed.
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()

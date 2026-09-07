@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -115,10 +116,7 @@ func usage(args []string) error {
 	}
 	// The rate column needs history. Seven days covers the longest window's
 	// smoothing horizon, and these rows are small.
-	hist, err := readingsSince(db, now.Add(-7*24*time.Hour))
-	if err != nil {
-		return err
-	}
+	hist := loadHistory(db, now.Add(-7*24*time.Hour))
 	if ok && !*force && now.Sub(last.FetchedAt) < time.Duration(*threshold)*time.Minute {
 		report(last, hist, now, true, *verbose)
 		return nil
@@ -160,6 +158,19 @@ func usage(args []string) error {
 			total.total(), calls, total.cached())
 	}
 	return nil
+}
+
+// loadHistory reads readings for the burn rate column. The rate is an
+// enhancement, so a read failure here must not take down the report the
+// guard rail hook depends on. It falls back to no history instead, which
+// makes burnRate report unknown and rateLabel render the column blank.
+func loadHistory(db *sql.DB, since time.Time) []Reading {
+	hist, err := readingsSince(db, since)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "clusage: read history:", err)
+		return nil
+	}
+	return hist
 }
 
 func report(r Reading, hist []Reading, now time.Time, cached bool, verbose bool) {
