@@ -57,7 +57,26 @@ func loadConfig() (Config, string, error) {
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		out, _ := json.MarshalIndent(defaultConfig, "", "  ")
-		if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
+		// Written through a temp file in the same directory: a truncating write
+		// that dies partway leaves a short config.json, and every later run
+		// then fails to parse it with no repair path.
+		tmp, err := os.CreateTemp(dir, "config-*.json")
+		if err != nil {
+			return Config{}, path, err
+		}
+		defer os.Remove(tmp.Name())
+		if _, err := tmp.Write(append(out, '\n')); err != nil {
+			tmp.Close()
+			return Config{}, path, err
+		}
+		if err := tmp.Chmod(0o600); err != nil {
+			tmp.Close()
+			return Config{}, path, err
+		}
+		if err := tmp.Close(); err != nil {
+			return Config{}, path, err
+		}
+		if err := os.Rename(tmp.Name(), path); err != nil {
 			return Config{}, path, err
 		}
 		return defaultConfig, path, nil
