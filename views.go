@@ -139,6 +139,8 @@ func (m model) nowView(height int) string {
 		if t, ok := w.resetTime(); ok {
 			meta = append(meta, "resets "+t.Local().Format("Mon 15:04")+" ("+untilLabel(t, now)+")")
 		}
+		rate, rateOK := burnRate(m.history, w.Name, now)
+		meta = append(meta, burnLabel(rate, frac, rateOK))
 		if len(meta) > 0 {
 			b.WriteString("    " + dimStyle.Render(strings.Join(meta, "   ")) + "\n")
 		}
@@ -163,6 +165,28 @@ func statusDot(status string) string {
 	default:
 		return negativeStyle.Render("●")
 	}
+}
+
+// burnLabel renders the burn rate and when the window fills at that rate. The
+// projection targets 100 percent, because a usage viewer answers "when is this
+// spent". The guard rail keeps its own thresholds in its own config.
+func burnLabel(rate, frac float64, ok bool) string {
+	if !ok {
+		return "burn -"
+	}
+	if rate < 0 {
+		rate = 0
+	}
+	label := "burn " + strconv.FormatFloat(rate, 'f', 1, 64) + "%/h"
+	if rate == 0 {
+		return label // nothing is draining, so there is nothing to project
+	}
+	hours := (1 - frac) * 100 / rate
+	if hours < 0 {
+		hours = 0
+	}
+	left := time.Duration(hours * float64(time.Hour))
+	return label + "  full in " + shortDur(left.Round(time.Minute))
 }
 
 // untilLabel renders how long until t, or "passed" once it is behind now.

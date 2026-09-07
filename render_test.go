@@ -98,3 +98,61 @@ func TestFetchErrorKeepsTabsReachable(t *testing.T) {
 		t.Error("the banner outlived the failure")
 	}
 }
+
+func TestBurnLabel(t *testing.T) {
+	// 67 points of headroom at 14.2 points per hour is about 4h43m.
+	got := burnLabel(14.2, 0.33, true)
+	if !strings.Contains(got, "burn 14.2%/h") {
+		t.Fatalf("burnLabel lost the rate: %q", got)
+	}
+	if !strings.Contains(got, "full in 4h43m") {
+		t.Fatalf("burnLabel lost the projection: %q", got)
+	}
+	// Nothing draining means no projection to make.
+	if got := burnLabel(0, 0.33, true); got != "burn 0.0%/h" {
+		t.Fatalf("a zero rate must not project: %q", got)
+	}
+	if got := burnLabel(-4, 0.33, true); got != "burn 0.0%/h" {
+		t.Fatalf("a negative rate must clamp and not project: %q", got)
+	}
+	if got := burnLabel(0, 0.33, false); got != "burn -" {
+		t.Fatalf("an unknown rate must read as a dash: %q", got)
+	}
+	// A full window has no time left rather than a negative one.
+	if got := burnLabel(10, 1.0, true); !strings.Contains(got, "full in 0m") {
+		t.Fatalf("a spent window must read as no time left: %q", got)
+	}
+}
+
+func TestNowViewShowsTheBurnRow(t *testing.T) {
+	hist := seedReadings(12)
+	m := model{
+		width:   100,
+		latest:  hist[len(hist)-1],
+		hasData: true,
+		history: hist,
+		cfg:     defaultConfig,
+	}
+	out := m.nowView(40)
+	if !strings.Contains(out, "burn ") {
+		t.Fatalf("nowView shows no burn row:\n%s", out)
+	}
+	if !strings.Contains(out, "%/h") {
+		t.Fatalf("nowView shows no rate unit:\n%s", out)
+	}
+}
+
+func TestNowViewWithoutHistoryShowsADash(t *testing.T) {
+	one := seedReadings(2)[:1]
+	m := model{
+		width:   100,
+		latest:  one[0],
+		hasData: true,
+		history: one,
+		cfg:     defaultConfig,
+	}
+	out := m.nowView(40)
+	if !strings.Contains(out, "burn -") {
+		t.Fatalf("one reading supports no rate, want a dash:\n%s", out)
+	}
+}
