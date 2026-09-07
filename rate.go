@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"regexp"
 	"strconv"
 	"time"
@@ -47,4 +48,58 @@ func tauFor(name string) time.Duration {
 		length = defaultWindowLength
 	}
 	return length / tauDivisor
+}
+
+// ratePoint is one reading reduced to what a rate needs. The reset header
+// comes along so a caller can see where a window rolled over.
+type ratePoint struct {
+	at    time.Time
+	frac  float64
+	reset string
+}
+
+// ratePoints pulls one window out of every reading, oldest first. A reading
+// that carries no usable utilization for that window contributes no point.
+func ratePoints(readings []Reading, name string) []ratePoint {
+	var out []ratePoint
+	for _, r := range readings {
+		for _, w := range parseWindows(r.Headers) {
+			if w.Name != name {
+				continue
+			}
+			if f, ok := w.utilFrac(); ok {
+				out = append(out, ratePoint{at: r.FetchedAt, frac: f, reset: w.Reset})
+			}
+			break
+		}
+	}
+	return out
+}
+
+// rateWalk replays a time-decayed average over pts. It returns the rate at
+// every point, oldest first, and whether that point carries a usable rate.
+// Both slices are the same length as pts, and index 0 is never usable because
+// one point carries no rate.
+//
+// The decay uses elapsed time rather than sample count, so a 30 second probe
+// pair and a 15 minute cron pair carry the weight their spacing deserves.
+func rateWalk(pts []ratePoint, tau time.Duration) ([]float64, []bool) {
+	vals := make([]float64, len(pts))
+	ok := make([]bool, len(pts))
+	ewma, seeded := 0.0, false
+	for i := 1; i < len(pts); i++ {
+		dt := pts[i].at.Sub(pts[i-1].at)
+		if dt > 0 {
+			// Utilization is a 0..1 fraction, so scale to whole percents.
+			inst := (pts[i].frac - pts[i-1].frac) * 100 / dt.Hours()
+			if seeded {
+				alpha := 1 - math.Exp(-dt.Seconds()/tau.Seconds())
+				ewma += alpha * (inst - ewma)
+			} else {
+				ewma, seeded = inst, true
+			}
+		}
+		vals[i], ok[i] = ewma, seeded
+	}
+	return vals, ok
 }
