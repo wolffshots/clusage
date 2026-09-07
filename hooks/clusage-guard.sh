@@ -406,13 +406,15 @@ trend() {
   }'
 }
 
-# retry <window> <reset>. Tells the caller when to come back.
+# retry <window> <reset>. Tells the caller what to do about the wait. It never
+# tells the agent to park itself. A wait of hours is the user's decision, so
+# the agent asks and waits for an answer.
 retry() {
   if [[ -z "$2" ]]; then
-    echo "The $1 window reported no reset time, so there is nothing to wait for. Stop all work now, in this agent and in every subagent, and report the limit to the user."
+    echo "The $1 window reported no reset time, so there is nothing to wait for. Stop all work now, in this agent and in every subagent. Report the limit to the user, and ask whether to stop here or keep working and pay overage. Wait for the answer. Do not decide it yourself."
     return 0
   fi
-  echo "It $2. Set a timer or a wake-up for that time and retry then. Trust that time. Do not run clusage again to check it. Stop all other work until then, in this agent and in every subagent."
+  echo "It $2. Stop all other work now, in this agent and in every subagent. Do not run clusage again to check it, and trust that time. Do not schedule a resume by yourself. Ask the user first, as a short multiple choice question, and wait for the answer. Offer three options: wait for the reset and resume then, keep working now and pay overage, or stop here. Set a timer or a wake-up only if the user picks the first option."
 }
 
 # stop <window> <status>. An exhausted window means overage pays for the call.

@@ -74,8 +74,8 @@ soft_edge="5h  90% used  allowed
 7d  20% used  allowed"
 run "$soft_edge" deny "5h limit is at 90%"
 
-# a deny names the reset clock time and tells the caller to wait for it
-run "$high5" deny "It resets Wed 19:30 (in 4h36m). Set a timer"
+# a deny names the reset clock time and tells the caller to stop and ask
+run "$high5" deny "It resets Wed 19:30 (in 4h36m). Stop all other work now"
 # a window with no reset leaves nothing to wait for
 run "$high7" deny "reported no reset time"
 
@@ -334,6 +334,16 @@ out=$(printf '%s\n' "$high5" > "$TMP/fx"; rm -f "$STAMP"; \
       bash "$GUARD" </dev/null 2>/dev/null)
 [[ "$out" != *"rising at"* ]] && pass=$((pass+1)) \
   || { fail=$((fail+1)); echo "FAIL: no rate must give no trend clause"; }
+
+# a deny must send the decision to the user, not park the agent on its own
+run "$high5" deny "Do not schedule a resume by yourself"
+run "$high5" deny "multiple choice question"
+run "$high5" deny "keep working now and pay overage"
+run "$high5" deny "only if the user picks"
+# a window with no reset has no timer to offer, so it asks a shorter question
+run "$high7" deny "reported no reset time"
+run "$high7" deny "ask whether to stop here or keep working and pay overage"
+run "$high7" deny "Do not decide it yourself"
 
 # --- the resume report ------------------------------------------------------
 
