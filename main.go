@@ -116,16 +116,19 @@ func usage(args []string) error {
 		return err
 	}
 	if len(headers) == 0 {
-		return fmt.Errorf("no anthropic-ratelimit-* headers on the response")
+		return fmt.Errorf("no usable anthropic-ratelimit-unified-* headers on the response")
 	}
 	r := Reading{FetchedAt: time.Now(), Model: *model, Headers: headers}
+	// The report goes out before the writes. The API call is already paid for,
+	// and the guard rail hook reads this output, so a failed write must not
+	// swallow the numbers.
+	report(r, time.Now(), false, *verbose)
 	if err := saveReading(db, r); err != nil {
-		return err
+		fmt.Fprintln(os.Stderr, "clusage: save reading:", err)
 	}
 	if err := saveTokens(db, TokenSample{CalledAt: r.FetchedAt, Model: *model, Used: used}); err != nil {
-		return err
+		fmt.Fprintln(os.Stderr, "clusage: save tokens:", err)
 	}
-	report(r, time.Now(), false, *verbose)
 	if *verbose {
 		total, calls, err := tokenTotals(db)
 		if err != nil {
