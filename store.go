@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -126,7 +127,12 @@ func openDB() (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dir, "clusage.db"))
+	// The driver only sets these when the DSN asks. Without them the database
+	// opens with journal_mode=delete and busy_timeout=0, so the guard rail hook
+	// and the TUI fail each other's writes instantly with SQLITE_BUSY.
+	dsn := "file:" + (&url.URL{Path: filepath.Join(dir, "clusage.db")}).String() +
+		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}

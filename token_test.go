@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -77,6 +78,47 @@ func TestTokenSeriesIsCumulative(t *testing.T) {
 	}
 	if len(stamps) != 3 || !stamps[0].Equal(time.Unix(100, 0)) {
 		t.Errorf("stamps = %v", stamps)
+	}
+}
+
+// The guard rail hook and the TUI hit the same file at the same time. Without
+// WAL and a busy timeout in the DSN the second writer fails instantly with
+// SQLITE_BUSY, and the guard then sees empty output and fails open.
+func TestOpenDBSetsWALAndBusyTimeout(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	db, err := openDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(mode, "wal") {
+		t.Errorf("journal_mode = %q, want wal", mode)
+	}
+	var timeout int
+	if err := db.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
+		t.Fatal(err)
+	}
+	if timeout <= 0 {
+		t.Errorf("busy_timeout = %d, want a positive value", timeout)
+	}
+}
+
+// A config directory with a space in it must still produce a valid DSN.
+func TestOpenDBHandlesAPathThatNeedsEscaping(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "my configs?v=1"))
+	db, err := openDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := saveTokens(db, TokenSample{
+		CalledAt: time.Now(), Model: "m", Used: tokenUse{Input: 1, Output: 1},
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
