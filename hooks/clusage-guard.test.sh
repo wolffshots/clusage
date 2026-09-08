@@ -93,8 +93,25 @@ run "$burned" deny "5h window is exhausted (status rejected)"
 
 # A row with no status header puts the rate in the status field. A rate is not
 # a status, so the window is not exhausted and the call goes through.
-no_status="5h  61% used              14.2%/h  resets Wed 19:30 (in 4h)"
+no_status="5h  61% used              14.2%/h  resets Wed 19:30 (in 4h)
+7d  20% used  allowed"
 run "$no_status" allow ""
+
+# --- no usable window denies ------------------------------------------------
+
+# The guard judges a percent. With no percent to judge it cannot tell headroom
+# from an exhausted window, so it denies rather than assume there is room.
+run "" deny "no usable rate limit window"
+run "clusage: no usable anthropic-ratelimit-unified-* headers on the response" \
+  deny "no usable rate limit window"
+# A partial table is the same condition. A missing 7d row leaves the hard cut
+# unenforced, which is exactly what this deny exists to prevent.
+run "5h  61% used  allowed  resets Wed 19:30 (in 4h)" deny "no usable rate limit window"
+run "7d  20% used  allowed" deny "no usable rate limit window"
+# The deny has to carry its own way out, because a denied agent cannot repair
+# clusage and cannot set an environment variable for the session.
+run "" deny "touch "
+run "" deny "clusage usage -force"
 
 # opting in drops back to the ordinary soft threshold path
 printf '%s\n' "$burned" > "$TMP/fx"
@@ -107,6 +124,8 @@ out=$(CLUSAGE_GUARD_ALLOW_OVERAGE=1 CLUSAGE_GUARD_FIXTURE="$TMP/fx" CLUSAGE_GUAR
 # a scheduling tool passes a tripped window, so the agent can book the retry
 run "$high7" allow "" '{"hook_event_name":"PreToolUse","tool_name":"ScheduleWakeup","tool_input":{}}'
 run "$high7" deny "7d limit is at 96%" '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{}}'
+# a deny asks the agent to question the user, so the question tool must pass too
+run "$high7" allow "" '{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{}}'
 
 # the off switch short circuits before any check
 off="$TMP/off"
@@ -375,6 +394,17 @@ run "$high5" deny "only if the user picks"
 run "$high7" deny "reported no reset time"
 run "$high7" deny "ask whether to stop here or keep working and pay overage"
 run "$high7" deny "Do not decide it yourself"
+
+# a denied agent cannot discover the allow list by trying, so every deny names it
+run "$high5" deny "still allows these tools"
+run "$high5" deny "AskUserQuestion"
+run "$high7" deny "still allows these tools"
+run "$burned" deny "still allows these tools"
+
+# the pay-overage option needs a lever the agent can hand to the user
+run "$high5" deny "clusage-guard.off"
+run "$high7" deny "clusage-guard.off"
+run "$burned" deny "clusage-guard.off"
 
 # a long wait must be chained, because a wake-up caps at one hour and a gap
 # over 55 minutes expires the prompt cache

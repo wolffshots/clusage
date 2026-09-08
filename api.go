@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"regexp"
 	"sort"
@@ -50,6 +51,22 @@ func (u tokenUse) add(v tokenUse) tokenUse {
 	}
 }
 
+// probe sends one inference call and hands back the message, the raw response
+// the rate limit headers live on, and the error. It is a helper so fetchUsage
+// can send the same request twice with a different max tokens.
+func probe(ctx context.Context, client anthropic.Client, model string, maxTokens int64) (*anthropic.Message, *http.Response, error) {
+	var raw *http.Response
+	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
+		Model:     anthropic.Model(model),
+		MaxTokens: maxTokens,
+		System:    []anthropic.TextBlockParam{{Text: claudeCodeSystemPrompt}},
+		Messages: []anthropic.MessageParam{
+			anthropic.NewUserMessage(anthropic.NewTextBlock("1")),
+		},
+	}, option.WithResponseInto(&raw))
+	return msg, raw, err
+}
+
 // fetchUsage makes the smallest possible inference call and returns the rate
 // limit headers plus what the call itself cost in tokens. The token counts are
 // zero when the API rejected the call, because a rejected call carries the
@@ -66,15 +83,21 @@ func fetchUsage(ctx context.Context, token, model string) (map[string]string, to
 		option.WithHeader("anthropic-beta", "oauth-2025-04-20"),
 		option.WithMaxRetries(0),
 	)
-	var raw *http.Response
-	msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:     anthropic.Model(model),
-		MaxTokens: 1,
-		System:    []anthropic.TextBlockParam{{Text: claudeCodeSystemPrompt}},
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock("1")),
-		},
-	}, option.WithResponseInto(&raw))
+	// Zero max tokens, not one. The API runs prefill, returns an empty content
+	// block with the headers intact, and bills no output token. Output costs
+	// five times what input does, so the discarded one-token reply carried
+	// about a sixth of the probe's price for nothing.
+	msg, raw, err := probe(ctx, client, model, 0)
+	// A 400 is the API rejecting the shape of the request, and zero max tokens
+	// is the only unusual thing about this one. If that support ever goes
+	// away, the one-token shape it replaced still works, so spend one more
+	// call rather than break every reading. Only on a 400: a 429 or a 5xx
+	// means the shape was fine and the call was refused, and a second probe
+	// there spends budget to be told the same thing twice.
+	var apiErr *anthropic.Error
+	if err != nil && errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
+		msg, raw, err = probe(ctx, client, model, 1)
+	}
 	var used tokenUse
 	if msg != nil {
 		used = tokenUse{

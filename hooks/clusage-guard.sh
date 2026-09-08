@@ -3,7 +3,8 @@
 #
 # On PreToolUse it pauses tool calls while the 5h rate limit window sits at or
 # above a soft threshold, and denies them once a 7d window passes a hard
-# threshold. The numbers come from `clusage usage`.
+# threshold. The numbers come from `clusage usage`. A run that yields no usable
+# window denies too, because an unknown budget is not the same as a free one.
 #
 # On SessionStart it reports what a resumed session costs to re-send, but only
 # once the prompt cache behind it has expired. Claude Code measures that and
@@ -46,7 +47,10 @@ POLL=${CLUSAGE_GUARD_POLL:-15}
 # A hook that blocks for minutes makes the Claude Code session look dead, and
 # the app kills it. Wait only for a short spike, then hand the decision back.
 MAXWAIT=${CLUSAGE_GUARD_MAXWAIT:-45}
-ALLOW_TOOLS=${CLUSAGE_GUARD_ALLOW_TOOLS:-"ScheduleWakeup CronCreate"}
+# A deny asks the agent to put the choice to the user and then to book a retry.
+# Both of those need a tool, so the tools that do them have to pass unchecked.
+# Without AskUserQuestion the guard denies the very question it just demanded.
+ALLOW_TOOLS=${CLUSAGE_GUARD_ALLOW_TOOLS:-"ScheduleWakeup CronCreate AskUserQuestion"}
 # CLUSAGE_GUARD_STATE names the stamp file. The default path is shared by every
 # session on the machine, so the test suite points this at its own directory.
 STATE="${CLUSAGE_GUARD_STATE:-${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp}"
@@ -308,9 +312,14 @@ fi
 # desktop app, so a tripped guard would otherwise deny the work of fixing it.
 [[ -e "$OFF" ]] && exit 0
 
+# Every deny names the tools that still pass, because a denied agent cannot
+# find that out by trying. The list is appended here, at the one choke point,
+# so no deny message can drift out of step with the list the gate enforces.
 deny() {
   local msg=${1//\\/}
   msg=${msg//\"/}
+  [[ -n "${ALLOW_TOOLS// /}" ]] &&
+    msg="$msg The guard still allows these tools, so use them to ask the user and to book a retry: ${ALLOW_TOOLS// /, }."
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$msg"
   exit 0
 }
@@ -377,13 +386,19 @@ field() {
 # two raw percents and the two raw rates follow, because the caller sizes its
 # next wait from all four, whichever window tripped. The reset text holds
 # spaces, so it stays last for the reader to absorb. Nothing is printed when
-# clusage is unavailable.
+# clusage produced no usable window, which reports the NODATA verdict.
 check() {
   local table five seven verdict=OK name=5h w pct status reset
   table=$(read_usage "$1")
-  [[ -z "$table" ]] && return 0   # clusage unavailable, fail open
+  # An empty table and a table with no window in it are the same condition:
+  # the guard has no number to judge. Both report NODATA so the caller denies.
+  [[ -z "$table" ]] && { printf 'NODATA||||||||\n'; return 0; }
   five=$(win "$table" "5h")
   seven=$(win "$table" "7d")
+  if [[ "${five%%|*}" == -1 || "${seven%%|*}" == -1 ]]; then
+    printf 'NODATA||||||||\n'
+    return 0
+  fi
   if [[ "${CLUSAGE_GUARD_ALLOW_OVERAGE:-0}" != 1 ]]; then
     if spent "$five"; then verdict=SPENT
     elif spent "$seven"; then verdict=SPENT name=7d
@@ -416,20 +431,38 @@ trend() {
   }'
 }
 
+# overage. How the user takes the pay-overage option the deny offers. The guard
+# denies every tool that is not on the allow list, so the agent cannot stand the
+# guard down itself. An environment variable is no help either, because the
+# desktop app cannot set one for a single session. The off switch is a file, so
+# the user can make it from inside the session.
+overage() {
+  echo "If the user picks overage, the guard has to stand down first, and you cannot do that yourself, because the guard denies the call. Give the user this command to run: touch $OFF. Then tell the user to run rm $OFF once the work is done, because the guard stays off while that file exists."
+}
+
 # retry <window> <reset>. Tells the caller what to do about the wait. It never
 # tells the agent to park itself. A wait of hours is the user's decision, so
 # the agent asks and waits for an answer.
 retry() {
   if [[ -z "$2" ]]; then
-    echo "The $1 window reported no reset time, so there is nothing to wait for. Stop all work now, in this agent and in every subagent. Report the limit to the user, and ask whether to stop here or keep working and pay overage. Wait for the answer. Do not decide it yourself."
+    echo "The $1 window reported no reset time, so there is nothing to wait for. Stop all work now, in this agent and in every subagent. Report the limit to the user, and ask whether to stop here or keep working and pay overage. Wait for the answer. Do not decide it yourself. $(overage)"
     return 0
   fi
-  echo "It $2. Stop all other work now, in this agent and in every subagent. Do not run clusage again to check it, and trust that time. Do not schedule a resume before the user answers. Ask the user first, as a short multiple choice question, and wait for the answer. Offer three options: wait for the reset and resume then, keep working now and pay overage, or stop here. Set a timer or a wake-up only if the user picks the first option. If the user waits, chain the wake-ups. A wake-up caps at one hour, and a gap over 55 minutes expires the prompt cache. Use legs of 55 minutes or less. Put the leg number, the total, and the reset time into the message the wake-up delivers back to you. On waking, read the leg number from that message. On an interim leg, schedule the next leg and do nothing else. Then end the turn. Never call a tool to check the clock, because a tool call can be denied."
+  echo "It $2. Stop all other work now, in this agent and in every subagent. Do not run clusage again to check it, and trust that time. Do not schedule a resume before the user answers. Ask the user first, as a short multiple choice question, and wait for the answer. Offer three options: wait for the reset and resume then, keep working now and pay overage, or stop here. Set a timer or a wake-up only if the user picks the first option. If the user waits, chain the wake-ups. A wake-up caps at one hour, and a gap over 55 minutes expires the prompt cache. Use legs of 55 minutes or less. Put the leg number, the total, and the reset time into the message the wake-up delivers back to you. On waking, read the leg number from that message. On an interim leg, schedule the next leg and do nothing else. Then end the turn. Never call a tool to check the clock, because a tool call can be denied. $(overage)"
 }
 
 # stop <window> <status>. An exhausted window means overage pays for the call.
 stop() {
-  deny "clusage guard rail: the $1 window is exhausted (status $2), so overage is paying for this call. Stop all work now, in this agent and in every subagent. Do not retry, because every retry spends more. Tell the user the window is exhausted and end the turn. Set CLUSAGE_GUARD_ALLOW_OVERAGE=1 to work on overage anyway."
+  deny "clusage guard rail: the $1 window is exhausted (status $2), so overage is paying for this call. Stop all work now, in this agent and in every subagent. Do not retry, because every retry spends more. Tell the user the window is exhausted and end the turn. To work on overage anyway, a terminal session can set CLUSAGE_GUARD_ALLOW_OVERAGE=1, and any session can run touch $OFF to stand the guard down until rm $OFF puts it back."
+}
+
+# nodata. The probe produced no usable window. That means clusage itself is
+# broken, not that there is headroom, so the guard denies rather than guess.
+# The message names the off switch, because a denied agent cannot repair
+# clusage on its own and the choice belongs to the user.
+nodata() {
+  echo "clusage guard rail: no usable rate limit window, usage is unknown, call denied." >&2
+  deny "clusage guard rail: clusage reported no usable rate limit window, so the guard cannot tell how much budget is left, and it denies instead of assuming there is room. Stop all work now, in this agent and in every subagent. Do not retry, because the next call is denied too. Tell the user that clusage is not reporting, and give them both of these commands: clusage usage -force to see the underlying error, and touch $OFF to stand the guard down until rm $OFF puts it back. Then end the turn and wait for the user."
 }
 
 # tool_name <payload>. The tool name from the PreToolUse event, so a scheduling
@@ -484,6 +517,10 @@ done
 # is what a fast poll needs.
 IFS='|' read -r verdict name value status pfive pseven rate5 rate7 reset <<<"$(check $((interval / 60)))"
 
+if [[ "$verdict" == "NODATA" ]]; then
+  nodata
+fi
+
 if [[ "$verdict" == "SPENT" ]]; then
   stop "$name" "$status"
 fi
@@ -498,6 +535,9 @@ if [[ "$verdict" == "SOFT" ]]; then
     sleep "$POLL"
     waited=$(( waited + POLL ))
     IFS='|' read -r verdict name value status pfive pseven rate5 rate7 reset <<<"$(check 0)"
+    if [[ "$verdict" == "NODATA" ]]; then
+      nodata
+    fi
     if [[ "$verdict" == "SPENT" ]]; then
       stop "$name" "$status"
     fi
