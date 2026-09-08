@@ -194,6 +194,54 @@ got=$(CLUSAGE_GUARD_INTERVAL=360 CLUSAGE_GUARD_INTERVAL_MIN=360 \
 [[ "$got" == 360 ]] && pass=$((pass+1)) \
   || { fail=$((fail+1)); echo "FAIL: equal bounds, got $got"; }
 
+# --- a bad bound falls back instead of breaking the guard --------------------
+
+# A ceiling that is not a number must not read as zero, which would turn the
+# ramp into a probe on every call.
+for bad in abc "" -5 3.5; do
+  got=$(CLUSAGE_GUARD_INTERVAL="$bad" bash "$GUARD" --interval 10 5)
+  [[ "$got" == 297 ]] && pass=$((pass+1)) \
+    || { fail=$((fail+1)); echo "FAIL: ceiling '$bad' expected 297, got ${got:-<empty>}"; }
+done
+# The floor keeps the same treatment.
+got=$(CLUSAGE_GUARD_INTERVAL_MIN=abc bash "$GUARD" --interval 90 20)
+[[ "$got" == 30 ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: floor abc expected 30, got ${got:-<empty>}"; }
+
+# A bad pause bound killed the hook the moment it reached the pause: bash read
+# MAXWAIT as a variable name in arithmetic, and sleep rejected POLL outright.
+# Either way the hook exited before it could deny, and the tool call went
+# through. Both now fall back, so the hook must still be pausing a few seconds
+# in. Waiting out the whole fallback pause would cost the suite a minute, so
+# check that it survived the pause instead.
+for bad in CLUSAGE_GUARD_MAXWAIT=abc CLUSAGE_GUARD_POLL=abc; do
+  printf '%s\n' "$high5" > "$TMP/fx"
+  rm -f "$STAMP"
+  timeout 3 env CLUSAGE_GUARD_FIXTURE="$TMP/fx" "$bad" \
+    bash "$GUARD" </dev/null >/dev/null 2>"$TMP/err"
+  rc=$?
+  if [[ $rc == 124 && "$(cat "$TMP/err")" != *"unbound variable"* \
+        && "$(cat "$TMP/err")" != *"invalid time interval"* ]]; then
+    pass=$((pass+1))
+  else
+    fail=$((fail+1))
+    echo "FAIL: $bad died in the pause (rc=$rc): $(cat "$TMP/err")"
+  fi
+done
+
+# POLL=0 never advances the wait, so the pause loop never ends. A hung hook is
+# killed on timeout, which lets the call through, so zero must not survive.
+printf '%s\n' "$high5" > "$TMP/fx"
+rm -f "$STAMP"
+out=$(CLUSAGE_GUARD_FIXTURE="$TMP/fx" CLUSAGE_GUARD_MAXWAIT=2 CLUSAGE_GUARD_POLL=0 \
+      timeout 20 bash "$GUARD" </dev/null 2>/dev/null)
+rc=$?
+if [[ $rc != 124 && "$out" == *'"deny"'* ]]; then
+  pass=$((pass+1))
+else
+  fail=$((fail+1)); echo "FAIL: POLL=0 hung or allowed (rc=$rc), got: ${out:-<empty>}"
+fi
+
 # --- the projection ---------------------------------------------------------
 
 pj() { # pj <percent> <rate> <cut> <expect seconds, or empty>

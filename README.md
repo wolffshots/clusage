@@ -338,13 +338,18 @@ more than the probes do. Run `bash clusage-guard.sh --interval <5h> <7d>` to
 print the wait for any pair. Set both bounds to the same number for a fixed
 interval. A cached check costs about 20ms.
 
-Both bounds tolerate a bad value rather than break the guard. A
-`CLUSAGE_GUARD_INTERVAL_MIN` that does not read as a whole number falls back to
-30. A floor above the ceiling is treated as a typo, and the ceiling wins. A
-percent that is missing or unreadable counts as no load, which gives the longest
-wait. One case is not a fallback: a `CLUSAGE_GUARD_INTERVAL` of 0, or any value
-that does not read as a number, means check on every tool call. That is a probe
-per call, so set the ceiling with care.
+Every bound tolerates a bad value rather than break the guard.
+`CLUSAGE_GUARD_INTERVAL`, `CLUSAGE_GUARD_INTERVAL_MIN`, `CLUSAGE_GUARD_POLL`
+and `CLUSAGE_GUARD_MAXWAIT` each fall back to their default unless the value
+reads as a whole number. A floor above the ceiling is treated as a typo, and
+the ceiling wins. A percent that is missing or unreadable counts as no load,
+which gives the longest wait.
+
+Zero stays meaningful for three of them. A ceiling of 0 means check on every
+tool call, which is a probe per call. A floor of 0 lets the ramp reach zero. A
+wait of 0 denies at once. `CLUSAGE_GUARD_POLL` is the exception and takes a
+floor of one second, because `sleep 0` never advances the wait and the pause
+loop would never end.
 
 The ramp is the floor, not the whole rule. When the table carries a burn rate,
 the guard also projects when each window reaches its own threshold, and takes

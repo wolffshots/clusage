@@ -37,16 +37,28 @@ SOFT=${CLUSAGE_GUARD_5H:-90}
 HARD=${CLUSAGE_GUARD_7D:-95}
 INTERVAL=${CLUSAGE_GUARD_INTERVAL:-300}
 INTERVAL_MIN=${CLUSAGE_GUARD_INTERVAL_MIN:-30}
-# INTERVAL_MIN reaches a bash arithmetic context in the gate. Bash reads a
-# value that is not a number as a variable name there, and set -u makes an
-# unbound name fatal. The hook would then exit before it could deny. Fall back
-# to the default instead. INTERVAL needs no such guard, because it only ever
-# reaches awk, which coerces junk to zero.
-[[ "$INTERVAL_MIN" =~ ^([1-9][0-9]*|0)$ ]] || INTERVAL_MIN=30
 POLL=${CLUSAGE_GUARD_POLL:-15}
 # A hook that blocks for minutes makes the Claude Code session look dead, and
 # the app kills it. Wait only for a short spike, then hand the decision back.
 MAXWAIT=${CLUSAGE_GUARD_MAXWAIT:-45}
+# Each value below has to read as a whole number, and a typo falls back to the
+# default. Every one of them reaches a bash arithmetic context, a sleep, or the
+# ramp, and a value that is not a number breaks the guard in one of three ways.
+# Bash reads such a value as a variable name in arithmetic, which set -u makes
+# fatal. sleep rejects it outright. awk coerces it to zero, which turns the
+# ceiling into a probe on every call. The first two kill the hook mid-decision,
+# and a dead hook lets the tool call through, which is the one outcome this
+# script exists to prevent.
+#
+# Zero stays legal for three of them. No ceiling means check on every call, no
+# floor lets the ramp reach zero, and no wait means deny at once. POLL is the
+# exception, because sleep 0 never advances the wait and the pause loop then
+# never ends. A hung hook is killed on timeout, which also lets the call
+# through, so POLL takes a floor of one second.
+[[ "$INTERVAL" =~ ^([1-9][0-9]*|0)$ ]] || INTERVAL=300
+[[ "$INTERVAL_MIN" =~ ^([1-9][0-9]*|0)$ ]] || INTERVAL_MIN=30
+[[ "$MAXWAIT" =~ ^([1-9][0-9]*|0)$ ]] || MAXWAIT=45
+[[ "$POLL" =~ ^[1-9][0-9]*$ ]] || POLL=15
 # A deny asks the agent to put the choice to the user and then to book a retry.
 # Both of those need a tool, so the tools that do them have to pass unchecked.
 # Without AskUserQuestion the guard denies the very question it just demanded.
