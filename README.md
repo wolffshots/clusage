@@ -23,8 +23,18 @@ read 20m0s ago  ·  claude-opus-5
 
 The Anthropic API reports your remaining budget in `anthropic-ratelimit-*`
 response headers. There is no endpoint that returns them on their own, so
-clusage makes the smallest possible inference call (one input token, one output
-token) and reads the headers off the response.
+clusage makes the smallest possible inference call and reads the headers off the
+response.
+
+The call asks for no reply at all. It sends `max_tokens: 0`, which runs prefill
+and returns an empty content block with the headers intact. Output costs five
+times what input does, so a probe that generates nothing is the cheapest one
+that still carries the numbers.
+
+If the API ever stops accepting that shape, it answers 400. Only on a 400,
+clusage sends the call again asking for one token, which is the shape that
+worked before. A 429 or a 5xx means the shape was fine and the call was refused,
+so there is no second probe there.
 
 Every reading goes into SQLite, which is what the history graphs draw from.
 
@@ -158,11 +168,14 @@ total over the chosen span, a per-call sparkline, and the breakdown into input,
 output, cache write and cache read. The all-time total is not limited by the
 span.
 
-The cache rows read 0 in normal use. Prompt caching needs a prefix of about
-1024 tokens, and a probe call is around 15 tokens, so nothing upstream will
-cache it. The rows are recorded anyway, because they come from the response
-`usage` block and cost nothing to keep. There is no cache header on the
-response; the body is the only place these counts appear.
+The output row reads 0, because the probe asks for no reply. A count above 0
+means the 400 fallback ran. The cache rows read 0 too, in normal use.
+The shortest prefix that prompt caching will hold is model dependent. It is
+512 tokens on `claude-opus-5` and 4096 on `claude-haiku-4-5`. A probe call is
+around 23 tokens, so no model caches it. The rows are recorded anyway,
+because they come from the response `usage` block and cost nothing to keep.
+There is no cache header on the response; the body is the only place these
+counts appear.
 
 **Config** shows the effective settings, whether the schedule parses, and when
 the next scheduled fetch lands.
@@ -211,18 +224,43 @@ same numbers as `clusage usage` and acts on them before each tool call:
 | 5h window still high after 45s | Deny the call, and tell the agent when to retry. |
 | Any 7d window at or above 95% | Deny the call at once. No polling. |
 | The tool is a scheduling tool | Allow the call, so the agent can book its retry. |
-| `clusage` missing or failing | Allow the call. |
+| `clusage` reports no usable window | Deny the call at once. No polling. |
 
 A deny names the window, its percent, and its reset clock time. It then tells
 the agent to set a timer or a wake-up for that time and to retry then, without
 running `clusage` again to check. Where the window reports no reset time, the
 deny tells the agent to stop and report to the user instead.
 
+The last row denies when the guard cannot read a number, rather than assuming
+there is room. That covers a missing
+`clusage`, a probe that fails, and a table that parses but carries no 5h or no
+7d row. A partial table is the dangerous case: a missing 7d row leaves the hard
+cut unenforced, which is the one thing this guard exists to prevent.
+
+A denied agent cannot repair `clusage`, so that deny carries its own way out. It
+gives the user two commands, `clusage usage -force` to see the underlying error
+and `touch ~/.claude/clusage-guard.off` to stand the guard down. The off switch
+matters more here than anywhere else, because a broken probe otherwise denies
+every tool call, including the ones needed to diagnose it.
+
 A deny never parks the agent on its own. It asks you first, and it only sets a
 wake-up if you say to wait. A wait longer than 55 minutes is chained into legs,
 because a wake-up caps at one hour and a longer gap expires the prompt cache.
 Each interim leg schedules the next one and does nothing else, so a long wait
 costs almost no tokens.
+
+Pick the pay-overage option and the guard has to stand down, which the agent
+cannot do for you. Every tool it would use to make the off switch is denied. So
+the deny hands the agent the two commands to give you:
+
+```sh
+touch ~/.claude/clusage-guard.off    # stand the guard down, work on overage
+rm ~/.claude/clusage-guard.off       # put it back when the work is done
+```
+
+The guard stays off while that file exists, so the second command matters. An
+exhausted window prints the same pair, next to the `CLUSAGE_GUARD_ALLOW_OVERAGE`
+variable, which only a terminal session can set.
 
 The exhausted case is different. A window that reports a status other than
 `allowed` has spent its quota, so the next call comes out of overage. The guard
@@ -233,6 +271,20 @@ working on overage.
 The guard reads the `PreToolUse` event on stdin and lets the scheduling tools
 through, so a denied agent can still book the retry it was just told to make.
 `CLUSAGE_GUARD_ALLOW_TOOLS` holds that list.
+
+The list has to cover both things a deny asks for. A deny tells the agent to put
+the choice to the user as a multiple choice question, and then to book a retry,
+so `AskUserQuestion` is on the list beside the two wake-up tools. Leave it there.
+Drop it and the guard denies the very question its own deny message demands, and
+the agent falls back to asking in plain text.
+
+Every deny also names the list, because a denied agent cannot find out what it
+may still call except by trying, and a try costs a denial. The names come from
+the live value of `CLUSAGE_GUARD_ALLOW_TOOLS`, so a custom list cannot drift out
+of step with the message.
+
+An empty `CLUSAGE_GUARD_ALLOW_TOOLS` does not clear the list. An empty value
+reads as unset, so the default comes back. Name the tools you want instead.
 
 The hook runs in front of every agent and subagent, so one session cannot talk
 its way past the limit. A pause is a sleep inside the hook, so the agent spends
@@ -286,6 +338,14 @@ more than the probes do. Run `bash clusage-guard.sh --interval <5h> <7d>` to
 print the wait for any pair. Set both bounds to the same number for a fixed
 interval. A cached check costs about 20ms.
 
+Both bounds tolerate a bad value rather than break the guard. A
+`CLUSAGE_GUARD_INTERVAL_MIN` that does not read as a whole number falls back to
+30. A floor above the ceiling is treated as a typo, and the ceiling wins. A
+percent that is missing or unreadable counts as no load, which gives the longest
+wait. One case is not a fallback: a `CLUSAGE_GUARD_INTERVAL` of 0, or any value
+that does not read as a number, means check on every tool call. That is a probe
+per call, so set the ceiling with care.
+
 The ramp is the floor, not the whole rule. When the table carries a burn rate,
 the guard also projects when each window reaches its own threshold, and takes
 whichever wait is shorter:
@@ -312,7 +372,8 @@ Every threshold is an environment variable, so no config file is needed:
 | `CLUSAGE_GUARD_POLL` | `15` | Seconds between checks while paused. |
 | `CLUSAGE_GUARD_MAXWAIT` | `45` | Deny after pausing this long. |
 | `CLUSAGE_GUARD_ALLOW_OVERAGE` | `0` | Set to `1` to keep working once a window is exhausted. |
-| `CLUSAGE_GUARD_ALLOW_TOOLS` | `ScheduleWakeup CronCreate` | Tool names that pass without a check. |
+| `CLUSAGE_GUARD_ALLOW_TOOLS` | `ScheduleWakeup CronCreate AskUserQuestion` | Tool names that pass without a check. |
+| `CLUSAGE_GUARD_STATE` | `$TMPDIR/clusage-guard-$USER.stamp` | Where the last check is recorded. Every session shares one file. |
 
 ### The off switch
 
@@ -433,6 +494,10 @@ bash hooks/clusage-guard.test.sh   # hook decisions, resume report, registration
 
 `TestRenderTabs` drives the model through `Update` and logs each tab, so
 `go test -run TestRenderTabs -v .` prints the whole UI without a terminal.
+
+The hook tests never call the API. `CLUSAGE_GUARD_FIXTURE` names a file holding
+a `clusage usage` table, and the guard reads that file instead of running
+`clusage`. Use it to replay any usage state by hand.
 
 ### Releasing
 
