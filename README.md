@@ -89,7 +89,15 @@ platforms. Everything else works on all three.
 
 ## Setup
 
-Store your Claude Code OAuth token once:
+Clusage needs a Claude Code OAuth token. Generate one with the Claude Code CLI,
+which requires an active Claude subscription:
+
+```sh
+claude setup-token
+```
+
+The command opens a browser, asks you to authorize, then prints the token. Copy
+it. Then store it once:
 
 ```sh
 clusage setup
