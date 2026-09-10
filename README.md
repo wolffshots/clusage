@@ -468,7 +468,7 @@ The file names every field, so nothing is hidden behind a default:
 
 ```json
 {
-  "model": "claude-opus-5",
+  "model": "claude-haiku-4-5",
   "threshold_minutes": 5,
   "fetch_cron": "*/15 * * * *",
   "history_hours": 168,

@@ -53,7 +53,7 @@ type Guard struct {
 }
 
 var defaultConfig = Config{
-	Model:            "claude-opus-5",
+	Model:            "claude-haiku-4-5",
 	ThresholdMinutes: 5,
 	FetchCron:        "*/15 * * * *",
 	HistoryHours:     168,
