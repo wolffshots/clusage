@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -603,8 +604,8 @@ func (m model) configView() string {
 	raw("hook", hookLabel(m.guard))
 
 	b.WriteString("\n")
-	row("config file", m.cfgPath)
-	row("database", m.dbPath)
+	row("config file", tilde(m.cfgPath))
+	row("database", tilde(m.dbPath))
 	raw("token", tokenLabel(m.hasToken))
 	row("version", version)
 
@@ -637,6 +638,16 @@ func hookLabel(st guardStatus) string {
 		state += warnStyle.Render("   CLUSAGE_GUARD_DISABLE=1")
 	}
 	return state
+}
+
+// tilde shortens a path under the home directory to "~/...". It keeps the row
+// inside a narrow terminal, and keeps the user name out of a screenshot.
+func tilde(p string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || !strings.HasPrefix(p, home+string(os.PathSeparator)) {
+		return p
+	}
+	return "~" + p[len(home):]
 }
 
 // tokenLabel reports whether a probe can run at all.

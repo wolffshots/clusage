@@ -4,20 +4,7 @@ A terminal UI (Go + Bubble Tea) for watching your **Claude Code rate limit
 windows**. It shows how much of each limit you have used, when each one
 resets, and how the usage moved over the last hours or days.
 
-```
-  Now    History    Tokens    Config    cron 30 4,10,16 * * 1-4
-
-▸ 5h        █████████████████████████████████████████████████████████░░░░░  92%
-    ● allowed_warning   resets Mon 19:19 (in 2h0m)
-
-  7d        █████████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  41%
-    ● allowed   resets Thu 15:19 (in 70h0m)
-
-  7d-opus   ███████████████████████████████████████░░░░░░░░░░░░░░░░░░░░░░░  63%
-    ● allowed
-
-read 20m0s ago  ·  claude-opus-5
-```
+![The clusage TUI: a gauge per limit window on the Now tab, the 5h and 7d windows graphed on the History tab, then the Tokens and Config tabs.](demo/clusage.gif)
 
 ## How it works
 
@@ -550,6 +537,7 @@ the wrong time. The Config tab flags it in red.
 go test ./...     # unit tests, plus a full render of every tab at 96x32
 go vet ./...
 bash hooks/clusage-guard.test.sh   # hook decisions, resume report, registration
+vhs demo/clusage.tape              # re-record the README demo, see demo/README.md
 ```
 
 `TestRenderTabs` drives the model through `Update` and logs each tab, so

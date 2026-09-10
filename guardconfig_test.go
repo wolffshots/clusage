@@ -172,3 +172,19 @@ func TestReadGuardStatus(t *testing.T) {
 		t.Errorf("the off switch and the disable variable were not seen: %+v", st)
 	}
 }
+
+// TestTilde checks the path shortening the Config tab uses. A screenshot of
+// that tab must not carry the user name.
+func TestTilde(t *testing.T) {
+	t.Setenv("HOME", "/Users/someone")
+	for path, want := range map[string]string{
+		"/Users/someone/.config/clusage/config.json": "~/.config/clusage/config.json",
+		"/Users/someone":        "/Users/someone",
+		"/Users/someone-else/x": "/Users/someone-else/x",
+		"/etc/clusage.json":     "/etc/clusage.json",
+	} {
+		if got := tilde(path); got != want {
+			t.Errorf("tilde(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
