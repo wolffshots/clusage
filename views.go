@@ -552,9 +552,11 @@ func (m model) configView() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Config") + "\n\n")
 
-	row := func(label, value string) {
-		b.WriteString("  " + labelStyle.Render(padRight(label, 18)) + valueStyle.Render(value) + "\n")
+	// raw takes a value that carries its own styling, row styles a plain one.
+	raw := func(label, value string) {
+		b.WriteString("  " + labelStyle.Render(padRight(label, 18)) + value + "\n")
 	}
+	row := func(label, value string) { raw(label, valueStyle.Render(value)) }
 	row("model", m.cfg.Model)
 	row("threshold", itoa(m.cfg.ThresholdMinutes)+"m")
 	row("history window", itoa(m.cfg.HistoryHours)+"h")
@@ -565,29 +567,84 @@ func (m model) configView() string {
 		if strings.TrimSpace(label) == "" {
 			label = "(unset)"
 		}
-		b.WriteString("  " + labelStyle.Render(padRight("fetch_cron", 18)) +
-			errorStyle.Render(label) + dimStyle.Render("  needs 5 fields per expression, ; separates several") + "\n")
-		b.WriteString("  " + labelStyle.Render(padRight("auto-fetch", 18)) + dimStyle.Render("disabled") + "\n")
+		raw("fetch_cron", errorStyle.Render(label)+
+			dimStyle.Render("  needs 5 fields per expression, ; separates several"))
+		raw("auto-fetch", dimStyle.Render("disabled"))
 	} else {
 		row("fetch_cron", m.cfg.FetchCron)
 		state := positiveStyle.Render("on")
 		if !m.autoFetch {
 			state = warnStyle.Render("paused (a resumes)")
 		}
-		b.WriteString("  " + labelStyle.Render(padRight("auto-fetch", 18)) + state + "\n")
+		raw("auto-fetch", state)
 		next := dimStyle.Render("never")
 		if t, ok := nextFetch(m.cfg, time.Now()); ok {
 			next = valueStyle.Render(t.Local().Format("Mon 15:04")) +
 				dimStyle.Render("  ("+untilLabel(t, time.Now())+")")
 		}
-		b.WriteString("  " + labelStyle.Render(padRight("next fetch", 18)) + next + "\n")
+		raw("next fetch", next)
 	}
 
-	b.WriteString("\n  " + labelStyle.Render(padRight("config file", 18)) + valueStyle.Render(m.cfgPath) + "\n")
-	b.WriteString("\n" + dimStyle.Render("  Edit the file and restart to change these. Cron fields:") + "\n")
-	b.WriteString(dimStyle.Render("  minute hour day-of-month month day-of-week, e.g. \"*/15 * * * *\" every 15 minutes,") + "\n")
-	b.WriteString(dimStyle.Render("  \"0 9-17 * * 1-5\" hourly on weekday work hours, \"5 9 * * *;35 18 * * *\" twice a day.") + "\n")
+	// The guard rail runs as a shell hook, and a CLUSAGE_GUARD_* variable
+	// overrides the file for one session. Report what the hook would apply,
+	// not what the file says, and name the variables that took over.
+	g, over := effectiveGuard(m.cfg.Guard)
+	b.WriteString("\n  " + labelStyle.Render("guard rail"))
+	if len(over) > 0 {
+		b.WriteString(dimStyle.Render("        env: " + strings.Join(over, ", ")))
+	}
+	b.WriteString("\n")
+	row("cuts", "5h "+itoa(g.Soft5h)+"%   7d "+itoa(g.Hard7d)+"%")
+	row("check every", itoa(g.Interval)+"s idle, "+itoa(g.IntervalMin)+
+		"s near a cut, "+itoa(g.Poll)+"s while paused")
+	raw("max wait", valueStyle.Render(itoa(g.MaxWait)+"s, then deny")+
+		dimStyle.Render("   overage ")+overageLabel(g.AllowOverage))
+	row("allow tools", strings.Join(g.AllowTools, ", "))
+	raw("hook", hookLabel(m.guard))
+
+	b.WriteString("\n")
+	row("config file", m.cfgPath)
+	row("database", m.dbPath)
+	raw("token", tokenLabel(m.hasToken))
+	row("version", version)
+
+	b.WriteString("\n" + dimStyle.Render("  Edit the file and restart to change these. Cron fields: minute hour") + "\n")
+	b.WriteString(dimStyle.Render("  day-of-month month day-of-week, e.g. \"*/15 * * * *\" every 15 minutes,") + "\n")
+	b.WriteString(dimStyle.Render("  \"0 9-17 * * 1-5\" weekday work hours, \"5 9 * * *;35 18 * * *\" twice a day.") + "\n")
 	return b.String()
+}
+
+// overageLabel says whether the guard keeps working once a window is spent.
+func overageLabel(allowed bool) string {
+	if allowed {
+		return warnStyle.Render("allowed")
+	}
+	return positiveStyle.Render("blocked")
+}
+
+// hookLabel says whether the guard is registered with Claude Code, and names
+// anything that has stood it down. A registered hook that is switched off
+// still denies nothing, so both halves matter.
+func hookLabel(st guardStatus) string {
+	state := positiveStyle.Render("registered")
+	if !st.Registered {
+		state = dimStyle.Render("not registered  (clusage hook install)")
+	}
+	switch {
+	case st.Off:
+		state += warnStyle.Render("   off switch present")
+	case st.Disabled:
+		state += warnStyle.Render("   CLUSAGE_GUARD_DISABLE=1")
+	}
+	return state
+}
+
+// tokenLabel reports whether a probe can run at all.
+func tokenLabel(has bool) string {
+	if has {
+		return positiveStyle.Render("in the login keychain")
+	}
+	return warnStyle.Render("not stored  (clusage setup)")
 }
 
 // ---- small helpers ---------------------------------------------------------

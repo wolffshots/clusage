@@ -40,10 +40,15 @@ func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', 4, 64) }
 // prints the result, so a broken layout shows up as a diff rather than only as
 // a panic. It also asserts the chrome the layout depends on.
 func TestRenderTabs(t *testing.T) {
+	// The Config tab reports whether the guard rail hook is registered, which
+	// it reads from the Claude Code settings file. Point that at an empty
+	// directory so the render does not change with the machine it runs on.
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	rs := seedReadings(40)
 	m := newModel(nil, Config{
 		Model: "claude-opus-5", ThresholdMinutes: 5,
 		FetchCron: "*/15 * * * *", HistoryHours: 168,
+		Guard: defaultConfig.Guard,
 	}, "/tmp/config.json", rs[len(rs)-1], true)
 	m.history = rs
 	m.tokens = seedTokenSamples(40)

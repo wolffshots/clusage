@@ -143,8 +143,8 @@ color tracks load: green under 60%, amber under 85%, red at or above 85%.
 
 **Now** also shows `burn 14.2%/h  full in 4h43m` under each gauge. The
 projection targets 100 percent, because the question a usage viewer answers is
-when the window is spent. The guard rail keeps its own thresholds in its own
-config, so the two never disagree by accident. A window with too little
+when the window is spent. The guard rail keeps its own thresholds, in the
+`guard` section of the config, so the two never disagree by accident. A window with too little
 history reads `burn -`.
 
 The Now tab reads the burn rate from the history span you selected with `s`,
@@ -178,7 +178,9 @@ There is no cache header on the response; the body is the only place these
 counts appear.
 
 **Config** shows the effective settings, whether the schedule parses, and when
-the next scheduled fetch lands.
+the next scheduled fetch lands. It also reports the guard rail thresholds the
+hook would apply, and marks a row an environment variable overrode. Last come
+the config and database paths, whether a token is stored, and the version.
 
 ### One-shot output
 
@@ -301,6 +303,7 @@ your client.
 clusage hook install      # register it in ~/.claude/settings.json
 clusage hook status       # show the registered command and timeout
 clusage hook uninstall    # remove it again
+clusage guard-config      # print the thresholds the script reads
 ```
 
 Install does two things. It links the script that ships with this build into
@@ -365,20 +368,51 @@ for any triple.
 
 ### Guard rail settings
 
-Every threshold is an environment variable, so no config file is needed:
+Every setting has a field in the `guard` section of `config.json` and an
+environment variable. The variable wins, so a single terminal session can
+override the machine. A value neither of them supplies falls back to the
+default in the table.
+
+| `guard` field | Variable | Default | Meaning |
+|---|---|---|---|
+| `soft_5h_percent` | `CLUSAGE_GUARD_5H` | `90` | Soft threshold, percent. Pause and poll. |
+| `hard_7d_percent` | `CLUSAGE_GUARD_7D` | `95` | Hard threshold, percent. Deny without polling. |
+| `interval_seconds` | `CLUSAGE_GUARD_INTERVAL` | `300` | Seconds between checks at low usage. |
+| `interval_min_seconds` | `CLUSAGE_GUARD_INTERVAL_MIN` | `30` | Seconds between checks at a threshold. |
+| `poll_seconds` | `CLUSAGE_GUARD_POLL` | `15` | Seconds between checks while paused. |
+| `max_wait_seconds` | `CLUSAGE_GUARD_MAXWAIT` | `45` | Deny after pausing this long. |
+| `allow_overage` | `CLUSAGE_GUARD_ALLOW_OVERAGE` | `false` | Set to `1` to keep working once a window is exhausted. |
+| `allow_tools` | `CLUSAGE_GUARD_ALLOW_TOOLS` | `ScheduleWakeup CronCreate AskUserQuestion` | Tool names that pass without a check. |
+
+The switches below have no config field. Two of them turn a feature off, which
+is what the off switch file below is for, and two exist for the test suite.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `CLUSAGE_GUARD_DISABLE` | `0` | Set to `1` to turn the guard off. |
-| `CLUSAGE_GUARD_5H` | `90` | Soft threshold, percent. Pause and poll. |
-| `CLUSAGE_GUARD_7D` | `95` | Hard threshold, percent. Deny without polling. |
-| `CLUSAGE_GUARD_INTERVAL` | `300` | Seconds between checks at low usage. |
-| `CLUSAGE_GUARD_INTERVAL_MIN` | `30` | Seconds between checks at a threshold. |
-| `CLUSAGE_GUARD_POLL` | `15` | Seconds between checks while paused. |
-| `CLUSAGE_GUARD_MAXWAIT` | `45` | Deny after pausing this long. |
-| `CLUSAGE_GUARD_ALLOW_OVERAGE` | `0` | Set to `1` to keep working once a window is exhausted. |
-| `CLUSAGE_GUARD_ALLOW_TOOLS` | `ScheduleWakeup CronCreate AskUserQuestion` | Tool names that pass without a check. |
+| `CLUSAGE_RESUME_DISABLE` | `0` | Set to `1` to turn the resume report off. |
 | `CLUSAGE_GUARD_STATE` | `$TMPDIR/clusage-guard-$USER.stamp` | Where the last check is recorded. Every session shares one file. |
+| `CLUSAGE_GUARD_FIXTURE` | unset | Read usage from a file instead of clusage. Also skips the config read. |
+
+The hook is a shell script, so it cannot parse JSON. It reads the fields
+through `clusage guard-config`, which prints them as `key=value` lines:
+
+```sh
+$ clusage guard-config
+soft_5h=90
+hard_7d=95
+interval=300
+interval_min=30
+poll=15
+maxwait=45
+allow_overage=0
+allow_tools=ScheduleWakeup CronCreate AskUserQuestion
+```
+
+The script reads those lines key by key and never evaluates them, and it takes
+only a known key with a plain value. A clusage that is missing or broken yields
+no lines, which leaves the defaults. The Config tab reports the resolved
+numbers, and marks the rows an environment variable took over.
 
 ### The off switch
 
@@ -434,12 +468,28 @@ Clusage writes `config.json` on first run, at `~/.config/clusage/config.json`
 (or under `XDG_CONFIG_HOME` when that is set). The SQLite file sits beside it as
 `clusage.db`.
 
+The file names every field, so nothing is hidden behind a default:
+
 ```json
 {
   "model": "claude-opus-5",
   "threshold_minutes": 5,
   "fetch_cron": "*/15 * * * *",
-  "history_hours": 168
+  "history_hours": 168,
+  "guard": {
+    "soft_5h_percent": 90,
+    "hard_7d_percent": 95,
+    "interval_seconds": 300,
+    "interval_min_seconds": 30,
+    "poll_seconds": 15,
+    "max_wait_seconds": 45,
+    "allow_overage": false,
+    "allow_tools": [
+      "ScheduleWakeup",
+      "CronCreate",
+      "AskUserQuestion"
+    ]
+  }
 }
 ```
 
@@ -449,8 +499,13 @@ Clusage writes `config.json` on first run, at `~/.config/clusage/config.json`
 | `threshold_minutes` | How long `clusage usage` reuses a cached reading. |
 | `fetch_cron` | Schedule for the automatic fetch. Empty disables it. |
 | `history_hours` | How far back the history graphs may read. |
+| `guard` | The guard rail hook's thresholds. See [Guard rail settings](#guard-rail-settings). |
 
-Edit the file and restart to pick up a change.
+A field you delete falls back to its default. A value out of range does the
+same, so a typo never disables the guard.
+
+Edit the file and restart to pick up a change. The Config tab reports the
+resolved settings, the paths, and whether the hook is registered.
 
 ## Scheduled fetches
 

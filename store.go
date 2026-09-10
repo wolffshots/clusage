@@ -24,6 +24,32 @@ type Config struct {
 	FetchCron string `json:"fetch_cron"`
 	// HistoryHours is how far back the history graphs read. 0 uses the default.
 	HistoryHours int `json:"history_hours"`
+	// Guard holds the guard rail hook's settings.
+	Guard Guard `json:"guard"`
+}
+
+// Guard holds the settings of the guard rail hook. The hook is a shell script,
+// so it reads them through "clusage guard-config" rather than parsing the JSON
+// itself. A CLUSAGE_GUARD_* environment variable still wins over the file, so a
+// single terminal session can override the machine.
+type Guard struct {
+	// Soft5h pauses and polls once the 5h window reaches this percent.
+	Soft5h int `json:"soft_5h_percent"`
+	// Hard7d denies without polling once the 7d window passes this percent.
+	Hard7d int `json:"hard_7d_percent"`
+	// Interval is the seconds between checks at low usage, IntervalMin the
+	// seconds between checks at a threshold.
+	Interval    int `json:"interval_seconds"`
+	IntervalMin int `json:"interval_min_seconds"`
+	// Poll is the seconds between checks while paused, MaxWait how long the
+	// hook pauses before it denies.
+	Poll    int `json:"poll_seconds"`
+	MaxWait int `json:"max_wait_seconds"`
+	// AllowOverage keeps working once a window is exhausted.
+	AllowOverage bool `json:"allow_overage"`
+	// AllowTools names the tools that pass without a check. An empty list
+	// reads as unset, because the hook cannot express one either.
+	AllowTools []string `json:"allow_tools"`
 }
 
 var defaultConfig = Config{
@@ -31,6 +57,16 @@ var defaultConfig = Config{
 	ThresholdMinutes: 5,
 	FetchCron:        "*/15 * * * *",
 	HistoryHours:     168,
+	Guard: Guard{
+		Soft5h:       90,
+		Hard7d:       95,
+		Interval:     300,
+		IntervalMin:  30,
+		Poll:         15,
+		MaxWait:      45,
+		AllowOverage: false,
+		AllowTools:   []string{"ScheduleWakeup", "CronCreate", "AskUserQuestion"},
+	},
 }
 
 // configDir returns ~/.config/clusage, honoring XDG_CONFIG_HOME.
@@ -97,7 +133,39 @@ func loadConfig() (Config, string, error) {
 	if cfg.HistoryHours <= 0 {
 		cfg.HistoryHours = defaultConfig.HistoryHours
 	}
+	cfg.Guard.normalize()
 	return cfg, path, nil
+}
+
+// normalize replaces any value the hook script would reject with the default,
+// so the Config tab reports the number the guard actually applies.
+//
+// Zero stays legal for three of them. No ceiling means check on every call, no
+// floor lets the ramp reach zero, and no wait means deny at once. Poll takes a
+// floor of one second, because sleep 0 never advances the pause loop.
+func (g *Guard) normalize() {
+	d := defaultConfig.Guard
+	if g.Soft5h < 0 || g.Soft5h > 100 {
+		g.Soft5h = d.Soft5h
+	}
+	if g.Hard7d < 0 || g.Hard7d > 100 {
+		g.Hard7d = d.Hard7d
+	}
+	if g.Interval < 0 {
+		g.Interval = d.Interval
+	}
+	if g.IntervalMin < 0 {
+		g.IntervalMin = d.IntervalMin
+	}
+	if g.Poll < 1 {
+		g.Poll = d.Poll
+	}
+	if g.MaxWait < 0 {
+		g.MaxWait = d.MaxWait
+	}
+	if len(g.AllowTools) == 0 {
+		g.AllowTools = d.AllowTools
+	}
 }
 
 // saveToken stores the OAuth token in the login keychain.

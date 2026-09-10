@@ -12,6 +12,10 @@ pass=0 fail=0
 # tests. Give this run its own stamp inside the throwaway directory.
 export CLUSAGE_GUARD_STATE="$TMP/stamp"
 STAMP="$CLUSAGE_GUARD_STATE"
+# The guard reads its thresholds through `clusage guard-config`. Point clusage
+# at a throwaway config directory, so these tests measure the defaults rather
+# than whatever the machine running them has configured.
+export XDG_CONFIG_HOME="$TMP/config"
 
 run() { # run <fixture-text> <expect: allow|deny> <expect-substring> [stdin-json]
   printf '%s\n' "$1" > "$TMP/fx"
@@ -386,6 +390,10 @@ read -r _ sfive sseven r5 r7 < "$STAMP"
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/clusage" <<'EOF'
 #!/usr/bin/env bash
+# The guard reads its thresholds through "guard-config" before every decision.
+# That call is not a probe, so it stays out of the argument log, and it answers
+# nothing so the built-in defaults stand.
+[[ "$1" == guard-config ]] && exit 0
 printf '%s\n' "$*" >> "$ARGLOG"
 cat "$FX"
 EOF
@@ -416,6 +424,81 @@ PATH="$TMP/bin:$PATH" CLUSAGE_GUARD_POLL=1 CLUSAGE_GUARD_MAXWAIT=2 \
   && pass=$((pass+1)) \
   || { fail=$((fail+1)); echo "FAIL: pause polls not live, got $(cat "$ARGLOG")"; }
 unset ARGLOG FX
+rm -f "$STAMP"
+
+# --- the config file --------------------------------------------------------
+
+# A clusage that answers guard-config with a lower soft cut, and serves the
+# usage table from the same fixture. No CLUSAGE_GUARD_FIXTURE here, because
+# that switch also turns the config read off.
+cat > "$TMP/bin/clusage" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == guard-config ]]; then
+  cat "$CFG"
+  exit 0
+fi
+cat "$FX"
+EOF
+chmod +x "$TMP/bin/clusage"
+export CFG="$TMP/cfg" FX="$TMP/fx"
+printf 'soft_5h=50\nhard_7d=95\ninterval=0\ninterval_min=0\npoll=1\nmaxwait=2\nallow_overage=0\nallow_tools=Solo\n' > "$CFG"
+mid="5h  60% used  allowed  resets Wed 19:30 (in 4h36m)
+7d  20% used  allowed"
+printf '%s\n' "$mid" > "$TMP/fx"
+
+# the config file lowers the soft cut, so 60% now pauses and then denies
+rm -f "$STAMP"
+out=$(PATH="$TMP/bin:$PATH" bash "$GUARD" </dev/null 2>/dev/null)
+[[ "$out" == *'"deny"'* && "$out" == *"soft limit 50%"* ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: config soft cut not applied, got: ${out:-<empty>}"; }
+
+# the config file supplies the poll and the wait as well, so the pause above
+# ended on its own rather than on the built-in 45s
+rm -f "$STAMP"
+start=$(date +%s)
+PATH="$TMP/bin:$PATH" bash "$GUARD" </dev/null >/dev/null 2>&1
+(( $(date +%s) - start < 10 )) && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: config maxwait not applied, the pause ran long"; }
+
+# an environment variable still wins over the config file
+rm -f "$STAMP"
+out=$(PATH="$TMP/bin:$PATH" CLUSAGE_GUARD_5H=99 bash "$GUARD" </dev/null 2>/dev/null)
+[[ -z "$out" ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: env must override the config soft cut, got: $out"; }
+
+# the config file supplies the allow list, so a tool on it passes unchecked
+rm -f "$STAMP"
+out=$(printf '{"tool_name":"Solo"}' | PATH="$TMP/bin:$PATH" bash "$GUARD" 2>/dev/null)
+[[ -z "$out" ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: config allow list not applied, got: $out"; }
+
+# a clusage that answers nothing leaves the built-in defaults, so 60% passes
+cat > "$TMP/bin/clusage" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == guard-config ]] && exit 1
+cat "$FX"
+EOF
+chmod +x "$TMP/bin/clusage"
+rm -f "$STAMP"
+out=$(PATH="$TMP/bin:$PATH" bash "$GUARD" </dev/null 2>/dev/null)
+[[ -z "$out" ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: a broken guard-config must fall back to the defaults, got: $out"; }
+
+# a hostile guard-config cannot inject shell, because no line is eval'd
+cat > "$TMP/bin/clusage" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == guard-config ]]; then
+  printf 'soft_5h=50; touch %s/pwned\nallow_tools=$(touch %s/pwned2)\n' "$TMP" "$TMP"
+  exit 0
+fi
+cat "$FX"
+EOF
+chmod +x "$TMP/bin/clusage"
+rm -f "$STAMP"
+PATH="$TMP/bin:$PATH" TMP="$TMP" bash "$GUARD" </dev/null >/dev/null 2>&1
+[[ ! -e "$TMP/pwned" && ! -e "$TMP/pwned2" ]] && pass=$((pass+1)) \
+  || { fail=$((fail+1)); echo "FAIL: guard-config output reached the shell as code"; }
+unset CFG FX
 rm -f "$STAMP"
 
 # --- the trend clause --------------------------------------------------------

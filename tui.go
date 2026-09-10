@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -114,6 +115,14 @@ type model struct {
 	cfg Config
 	// cfgPath is shown on the config tab so the user knows what to edit.
 	cfgPath string
+	// dbPath sits beside it, and is derived rather than read, so the config
+	// tab costs no syscall per frame.
+	dbPath string
+	// guard is the guard rail hook's registration, read once at startup.
+	guard guardStatus
+	// hasToken is set by runTUI, because reading it runs the keychain and a
+	// test that builds a model must not.
+	hasToken bool
 
 	keys keyMap
 	help help.Model
@@ -162,6 +171,8 @@ func newModel(db *sql.DB, cfg Config, cfgPath string, latest Reading, hasData bo
 		db:        db,
 		cfg:       cfg,
 		cfgPath:   cfgPath,
+		dbPath:    filepath.Join(filepath.Dir(cfgPath), "clusage.db"),
+		guard:     readGuardStatus(),
 		keys:      km,
 		help:      help.New(),
 		spin:      sp,
@@ -487,7 +498,12 @@ func runTUI() error {
 	if err != nil {
 		return err
 	}
-	p := tea.NewProgram(newModel(db, cfg, path, latest, ok), tea.WithAltScreen())
+	m := newModel(db, cfg, path, latest, ok)
+	// The keychain read runs once here, not in newModel, so nothing but the
+	// real TUI touches it.
+	_, terr := loadToken()
+	m.hasToken = terr == nil
+	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
 }

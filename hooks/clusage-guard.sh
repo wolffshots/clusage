@@ -17,6 +17,11 @@
 # --interval <5h percent> <7d percent> to print the wait the ramp picks. Run
 # --project <percent> <rate> <cut> to print the wait the projection picks.
 #
+# The thresholds come from the "guard" section of config.json, which clusage
+# prints for this script. An environment variable below overrides the file for
+# one session, and a value neither of them supplies falls back to the built-in
+# default. The two disable switches and the two test hooks are environment only.
+#
 # Config (environment):
 #   CLUSAGE_GUARD_DISABLE=1     turn the guard off
 #   CLUSAGE_RESUME_DISABLE=1    turn the resume report off
@@ -33,14 +38,43 @@
 # Touch $CLAUDE_DIR/clusage-guard.off to turn the guard off for every session.
 set -uo pipefail
 
-SOFT=${CLUSAGE_GUARD_5H:-90}
-HARD=${CLUSAGE_GUARD_7D:-95}
-INTERVAL=${CLUSAGE_GUARD_INTERVAL:-300}
-INTERVAL_MIN=${CLUSAGE_GUARD_INTERVAL_MIN:-30}
-POLL=${CLUSAGE_GUARD_POLL:-15}
+# --- the config file --------------------------------------------------------
+
+# Bash cannot parse JSON, so `clusage guard-config` prints the guard section of
+# config.json as one "key=value" a line. The lines are read key by key and not
+# eval'd, and only a known key with a plain value is taken, so nothing here
+# reaches the shell as code. A clusage that is missing or broken yields no
+# lines, which leaves the built-in defaults below.
+#
+# CLUSAGE_GUARD_FIXTURE means read usage from a file instead of clusage, so it
+# skips this read as well. A test then sees the built-in defaults.
+cfg_soft="" cfg_hard="" cfg_interval="" cfg_interval_min=""
+cfg_poll="" cfg_maxwait="" cfg_overage="" cfg_tools=""
+if [[ -z "${CLUSAGE_GUARD_FIXTURE:-}" ]]; then
+  num_re='^([1-9][0-9]*|0)$'
+  while IFS='=' read -r key value; do
+    case "$key" in
+      soft_5h)       [[ "$value" =~ $num_re ]] && cfg_soft=$value ;;
+      hard_7d)       [[ "$value" =~ $num_re ]] && cfg_hard=$value ;;
+      interval)      [[ "$value" =~ $num_re ]] && cfg_interval=$value ;;
+      interval_min)  [[ "$value" =~ $num_re ]] && cfg_interval_min=$value ;;
+      poll)          [[ "$value" =~ $num_re ]] && cfg_poll=$value ;;
+      maxwait)       [[ "$value" =~ $num_re ]] && cfg_maxwait=$value ;;
+      allow_overage) [[ "$value" =~ $num_re ]] && cfg_overage=$value ;;
+      allow_tools)   [[ "$value" =~ ^[A-Za-z0-9_\ -]*$ ]] && cfg_tools=$value ;;
+    esac
+  done < <(clusage guard-config 2>/dev/null)
+fi
+
+SOFT=${CLUSAGE_GUARD_5H:-${cfg_soft:-90}}
+HARD=${CLUSAGE_GUARD_7D:-${cfg_hard:-95}}
+INTERVAL=${CLUSAGE_GUARD_INTERVAL:-${cfg_interval:-300}}
+INTERVAL_MIN=${CLUSAGE_GUARD_INTERVAL_MIN:-${cfg_interval_min:-30}}
+POLL=${CLUSAGE_GUARD_POLL:-${cfg_poll:-15}}
 # A hook that blocks for minutes makes the Claude Code session look dead, and
 # the app kills it. Wait only for a short spike, then hand the decision back.
-MAXWAIT=${CLUSAGE_GUARD_MAXWAIT:-45}
+MAXWAIT=${CLUSAGE_GUARD_MAXWAIT:-${cfg_maxwait:-45}}
+ALLOW_OVERAGE=${CLUSAGE_GUARD_ALLOW_OVERAGE:-${cfg_overage:-0}}
 # Each value below has to read as a whole number, and a typo falls back to the
 # default. Every one of them reaches a bash arithmetic context, a sleep, or the
 # ramp, and a value that is not a number breaks the guard in one of three ways.
@@ -55,14 +89,17 @@ MAXWAIT=${CLUSAGE_GUARD_MAXWAIT:-45}
 # exception, because sleep 0 never advances the wait and the pause loop then
 # never ends. A hung hook is killed on timeout, which also lets the call
 # through, so POLL takes a floor of one second.
-[[ "$INTERVAL" =~ ^([1-9][0-9]*|0)$ ]] || INTERVAL=300
-[[ "$INTERVAL_MIN" =~ ^([1-9][0-9]*|0)$ ]] || INTERVAL_MIN=30
-[[ "$MAXWAIT" =~ ^([1-9][0-9]*|0)$ ]] || MAXWAIT=45
-[[ "$POLL" =~ ^[1-9][0-9]*$ ]] || POLL=15
+#
+# A value the environment got wrong falls through to the config file, which is
+# already known to read as a number, so one fallback each is enough.
+[[ "$INTERVAL" =~ ^([1-9][0-9]*|0)$ ]] || INTERVAL=${cfg_interval:-300}
+[[ "$INTERVAL_MIN" =~ ^([1-9][0-9]*|0)$ ]] || INTERVAL_MIN=${cfg_interval_min:-30}
+[[ "$MAXWAIT" =~ ^([1-9][0-9]*|0)$ ]] || MAXWAIT=${cfg_maxwait:-45}
+[[ "$POLL" =~ ^[1-9][0-9]*$ ]] || POLL=${cfg_poll:-15}
 # A deny asks the agent to put the choice to the user and then to book a retry.
 # Both of those need a tool, so the tools that do them have to pass unchecked.
 # Without AskUserQuestion the guard denies the very question it just demanded.
-ALLOW_TOOLS=${CLUSAGE_GUARD_ALLOW_TOOLS:-"ScheduleWakeup CronCreate AskUserQuestion"}
+ALLOW_TOOLS=${CLUSAGE_GUARD_ALLOW_TOOLS:-${cfg_tools:-"ScheduleWakeup CronCreate AskUserQuestion"}}
 # CLUSAGE_GUARD_STATE names the stamp file. The default path is shared by every
 # session on the machine, so the test suite points this at its own directory.
 STATE="${CLUSAGE_GUARD_STATE:-${TMPDIR:-/tmp}/clusage-guard-${USER:-x}.stamp}"
@@ -411,7 +448,7 @@ check() {
     printf 'NODATA||||||||\n'
     return 0
   fi
-  if [[ "${CLUSAGE_GUARD_ALLOW_OVERAGE:-0}" != 1 ]]; then
+  if [[ "$ALLOW_OVERAGE" != 1 ]]; then
     if spent "$five"; then verdict=SPENT
     elif spent "$seven"; then verdict=SPENT name=7d
     fi

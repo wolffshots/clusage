@@ -43,10 +43,12 @@ func run(args []string) error {
 		return usage(args)
 	case "hook":
 		return hook(args)
+	case "guard-config":
+		return guardConfig()
 	case "tui":
 		return runTUI()
 	default:
-		return fmt.Errorf("unknown command %q (want: tui, setup, usage, hook)", cmd)
+		return fmt.Errorf("unknown command %q (want: tui, setup, usage, hook, guard-config)", cmd)
 	}
 }
 
