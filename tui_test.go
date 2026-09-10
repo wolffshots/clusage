@@ -486,3 +486,46 @@ func TestTimeChartColorsSurviveAGap(t *testing.T) {
 		t.Errorf("braille drawn in %v, want every rune in the band 0 green %q", inked, want)
 	}
 }
+
+// TestBinToColumns pins the reducer the charts draw through. One point per
+// column, the highest value in the column, the real time that value was read,
+// and no point at all for a column with no reading.
+func TestBinToColumns(t *testing.T) {
+	from := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	col := time.Hour
+	peak := from.Add(20 * time.Minute)
+	stamps := []time.Time{
+		from,                       // column 0
+		peak,                       // column 0, the highest
+		from.Add(40 * time.Minute), // column 0
+		from.Add(3 * time.Hour),    // column 3, so 1 and 2 stay empty
+	}
+	vals, out := binToColumns([]float64{0.2, 0.9, 0.4, 0.5}, stamps, from, col, 4)
+
+	if len(vals) != 2 {
+		t.Fatalf("binToColumns kept %d points, want one per filled column", len(vals))
+	}
+	if vals[0] != 0.9 {
+		t.Errorf("column 0 kept %v, want the 0.9 peak", vals[0])
+	}
+	if !out[0].Equal(peak) {
+		t.Errorf("column 0 reports %v, want the time the peak was read, %v", out[0], peak)
+	}
+	if vals[1] != 0.5 {
+		t.Errorf("column 3 kept %v, want 0.5", vals[1])
+	}
+	// The empty columns must not appear as points. The gap between what is left
+	// is what breaks the line.
+	if got := out[1].Sub(out[0]); got != 2*time.Hour+40*time.Minute {
+		t.Errorf("kept points are %v apart, want the hole preserved", got)
+	}
+
+	// A reading before the window start clamps into the first column rather than
+	// vanishing, and a zero column width passes the series through untouched.
+	if v, _ := binToColumns([]float64{1}, []time.Time{from.Add(-time.Hour)}, from, col, 4); len(v) != 1 {
+		t.Error("a reading before the window start was dropped")
+	}
+	if v, _ := binToColumns([]float64{1, 2}, []time.Time{from, from}, from, 0, 4); len(v) != 2 {
+		t.Error("a zero column width must pass the series through")
+	}
+}

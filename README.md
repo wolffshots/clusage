@@ -154,6 +154,11 @@ line breaks where the gap between readings runs well past that series own
 typical spacing, so a stretch with no reading draws as a gap rather than as a
 straight line across the hole.
 
+A column holds the highest reading that landed in it, not their average. On a
+30 day span one column covers about eight hours, so a mean would hide a window
+that touched its limit inside that slice. Widen or narrow the span with `s` to
+trade detail for reach.
+
 **Tokens** graphs what clusage spent on its own probe calls: a cumulative
 total over the chosen span, the cost of each call, and the breakdown into input,
 output, cache write and cache read. The all-time total is not limited by the

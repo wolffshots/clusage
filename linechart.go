@@ -41,6 +41,49 @@ func gapLimit(stamps []time.Time, col time.Duration) time.Duration {
 	return limit
 }
 
+// binToColumns reduces a series to at most one point per chart column, keeping
+// the highest value that landed in each column and the time that value was
+// read. A column with no reading yields no point, so a hole stays a hole.
+//
+// The library draws a line between every pair of points it holds, and it never
+// averages a column. So a 30 day span, where one column covers about 8 hours
+// and holds dozens of readings between 0 and 100 percent, drew each column as a
+// vertical smear rather than as a line.
+//
+// The reducer is max rather than mean, because every chart here answers a "how
+// high did it get" question. A window that touched its limit inside a column
+// must not average down to something comfortable.
+//
+// The kept timestamp is the real reading time, not the middle of the column, so
+// the line still passes through a point that happened.
+func binToColumns(vals []float64, stamps []time.Time, from time.Time,
+	col time.Duration, w int) ([]float64, []time.Time) {
+	if col <= 0 || w <= 0 {
+		return vals, stamps
+	}
+	best := make([]float64, w)
+	at := make([]time.Time, w)
+	filled := make([]bool, w)
+	for i, v := range vals {
+		if i >= len(stamps) {
+			break
+		}
+		idx := clamp(int(stamps[i].Sub(from)/col), 0, w-1)
+		if !filled[idx] || v > best[idx] {
+			best[idx], at[idx], filled[idx] = v, stamps[i], true
+		}
+	}
+	outVals := make([]float64, 0, w)
+	outStamps := make([]time.Time, 0, w)
+	for i := range best {
+		if filled[i] {
+			outVals = append(outVals, best[i])
+			outStamps = append(outStamps, at[i])
+		}
+	}
+	return outVals, outStamps
+}
+
 // chartLine is one series on a chart: the values, the time each was read, and
 // which palette entry each value belongs in.
 //
@@ -59,8 +102,11 @@ type chartLine struct {
 // It answers three things the block area chart could not. A column is a fixed
 // slice of [from, to), so the axis stays uniform however irregular the polls
 // are. Points join with a line, so the shape between samples reads as a trend.
-// A hole wider than gapCols columns breaks the line, so a stretch with no
-// reading draws as a gap rather than as a long straight interpolation.
+// A hole breaks the line, so a stretch with no reading draws as a gap rather
+// than as a long straight interpolation.
+//
+// Each series is reduced to one point per column before it is drawn. See
+// binToColumns for why, and for which value a column keeps.
 //
 // The library styles a data set, not a point, so a run of samples that share a
 // palette entry becomes one data set. A run starts with the last point of the
@@ -96,15 +142,15 @@ func timeChart(lines []chartLine, palette []lipgloss.Style, from, to time.Time,
 	col := time.Duration(int64(span) / int64(w))
 
 	for li, line := range lines {
-		maxGap := gapLimit(line.stamps, col)
+		// Reduce to one point per column first. gapLimit then reads the spacing
+		// of what actually gets drawn, which is what the break has to judge.
+		vals, stamps := binToColumns(line.vals, line.stamps, from, col, w)
+		maxGap := gapLimit(stamps, col)
 		seg, segBand := -1, -1
 		var prev time.Time
 		var prevVal float64
-		for i, v := range line.vals {
-			if i >= len(line.stamps) {
-				break
-			}
-			at := line.stamps[i]
+		for i, v := range vals {
+			at := stamps[i]
 			b := clamp(line.band(v), 0, len(palette)-1)
 			// A new segment starts at the first point, after a hole, or at a
 			// palette crossing. The crossing case carries the previous point
