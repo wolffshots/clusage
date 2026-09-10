@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // seedReadings builds a plausible history: 5h climbing to 92%, 7d flat-ish.
@@ -253,10 +254,10 @@ func flatRateReadings(n int) []Reading {
 	return out
 }
 
-// TestHistoryViewKeepsEveryWindowSparkline pins the row budget. The rate block
-// must pay for its own label row and blank line. If it does not, clip eats the
-// comparison sparklines off the bottom of the view.
-func TestHistoryViewKeepsEveryWindowSparkline(t *testing.T) {
+// TestHistoryViewKeepsEveryWindow pins the row budget. Every frame must pay for
+// its own borders. If one does not, clip eats the overlay frame off the bottom
+// of the view and the other windows go with it.
+func TestHistoryViewKeepsEveryWindow(t *testing.T) {
 	hist := seedReadings(24)
 	m := model{
 		width:   100,
@@ -275,8 +276,8 @@ func TestHistoryViewKeepsEveryWindowSparkline(t *testing.T) {
 				height, out)
 		}
 		for _, name := range []string{"5h", "7d", "7d-opus"} {
-			if !strings.Contains(out, padRight(name, 10)) {
-				t.Fatalf("height %d lost the %s sparkline row:\n%s", height, name, out)
+			if !strings.Contains(out, "● "+name) {
+				t.Fatalf("height %d lost %s from the overlay legend:\n%s", height, name, out)
 			}
 		}
 		if lines := strings.Count(out, "\n") + 1; lines > height {
@@ -286,10 +287,13 @@ func TestHistoryViewKeepsEveryWindowSparkline(t *testing.T) {
 	}
 }
 
-// TestHistoryViewFallbackDrawsAFlatRateFlat pins the one row fallback to a zero
-// based scale. sparkline autoscales between the series min and max with no
-// floor on the span, so it draws a flat rate as a sawtooth.
-func TestHistoryViewFallbackDrawsAFlatRateFlat(t *testing.T) {
+// TestHistoryViewDrawsAFlatRateFlat pins the burn rate chart to a zero based
+// scale. Scaling between the series own min and max would give a flat rate a
+// zero span, and it would then draw as a sawtooth of rounding noise.
+//
+// A short terminal has to keep the rate chart. It is the reason to look at this
+// tab, so it may not be the first frame to go.
+func TestHistoryViewDrawsAFlatRateFlat(t *testing.T) {
 	hist := flatRateReadings(12)
 	m := model{
 		width:   100,
@@ -298,25 +302,67 @@ func TestHistoryViewFallbackDrawsAFlatRateFlat(t *testing.T) {
 		history: hist,
 		cfg:     defaultConfig,
 	}
-	// One window and a height of 13 leave a budget of 6, which is the one row
-	// fallback branch.
 	out := m.historyView(13)
-	row := ""
+	if !strings.Contains(out, "burn rate") {
+		t.Fatalf("height 13 dropped the burn rate frame:\n%s", out)
+	}
+
+	// Take the rate frame's own rows, which run from its title to its bottom
+	// border, and count how many of them carry ink.
+	inked := 0
+	inFrame := false
 	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, "burn %/h") {
-			row = line
+		switch {
+		case strings.Contains(line, "burn rate"):
+			inFrame = true
+			continue
+		case !inFrame:
+			continue
+		case strings.HasPrefix(line, "╰"):
+			inFrame = false
+			continue
+		}
+		if strings.ContainsFunc(line, func(r rune) bool { return r >= '⠁' && r <= '⣿' }) {
+			inked++
 		}
 	}
-	if row == "" {
-		t.Fatalf("height 13 drew no fallback burn row:\n%s", out)
+	if inked != 1 {
+		t.Fatalf("a flat rate must draw on one row, got %d:\n%s", inked, out)
 	}
-	seen := map[rune]bool{}
-	for _, r := range row {
-		if strings.ContainsRune(string(sparkLevels), r) {
-			seen[r] = true
+}
+
+// TestFramesAlign pins the frame border to one width per view. A title is built
+// from styled runes, and lipgloss measures display columns rather than bytes,
+// so a mistake here shows up as a ragged right edge rather than as a failure.
+func TestFramesAlign(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	rs := seedReadings(40)
+	m := newModel(nil, defaultConfig, "/tmp/config.json", rs[len(rs)-1], true)
+	m.history = rs
+	m.tokens = seedTokenSamples(40)
+
+	var mm tea.Model = m
+	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 96, Height: 32})
+	for i, name := range tabNames {
+		mm, _ = mm.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune('1' + i)}})
+		want, seen := 0, 0
+		for _, line := range strings.Split(mm.View(), "\n") {
+			if !strings.HasPrefix(line, "╭") && !strings.HasPrefix(line, "│") &&
+				!strings.HasPrefix(line, "╰") {
+				continue
+			}
+			seen++
+			w := lipgloss.Width(line)
+			if want == 0 {
+				want = w
+				continue
+			}
+			if w != want {
+				t.Errorf("%s: frame line %d columns wide, want %d: %q", name, w, want, line)
+			}
 		}
-	}
-	if len(seen) != 1 {
-		t.Fatalf("a flat rate must draw one glyph, got %d in %q:\n%s", len(seen), row, out)
+		if seen == 0 && name != "Now" {
+			t.Errorf("%s drew no frames", name)
+		}
 	}
 }

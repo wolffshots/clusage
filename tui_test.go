@@ -1,12 +1,15 @@
 package main
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 func at(spec string) time.Time {
@@ -112,96 +115,6 @@ func TestGauge(t *testing.T) {
 	}
 	if got := gauge(0.5, 0); got != "" {
 		t.Errorf("gauge with zero width = %q, want empty", got)
-	}
-}
-
-func TestSparkline(t *testing.T) {
-	if got, _ := sparkline([]float64{0, 1}, 2); got != "▁█" {
-		t.Errorf("sparkline = %q, want ▁█", got)
-	}
-	// A flat series has no span; every point must land on the lowest level
-	// rather than divide by zero.
-	if got, _ := sparkline([]float64{5, 5, 5}, 3); got != "▁▁▁" {
-		t.Errorf("flat sparkline = %q, want ▁▁▁", got)
-	}
-	if got, _ := sparkline(nil, 5); got != "" {
-		t.Errorf("empty sparkline = %q, want empty", got)
-	}
-	// More points than width samples down to exactly width glyphs, and each
-	// glyph reports the value it stands for so the caller can colour it.
-	got, vals := sparkline([]float64{0, 1, 2, 3, 4, 5, 6, 7}, 4)
-	if len([]rune(got)) != 4 {
-		t.Errorf("resampled sparkline = %q, want 4 glyphs", got)
-	}
-	if len(vals) != 4 {
-		t.Errorf("got %d values for 4 glyphs", len(vals))
-	}
-}
-
-func TestAreaChart(t *testing.T) {
-	rows, _ := areaChart([]float64{0, 0.5, 1}, 3, 4, 0, 1)
-	if len(rows) != 4 {
-		t.Fatalf("got %d rows, want 4", len(rows))
-	}
-	for i, r := range rows {
-		if n := len([]rune(r)); n != 3 {
-			t.Errorf("row %d has %d cells, want 3", i, n)
-		}
-	}
-	// Top row: only the full-height column is filled. Bottom row: the zero
-	// column is blank and both others are full.
-	if rows[0] != "  █" {
-		t.Errorf("top row = %q, want %q", rows[0], "  █")
-	}
-	if rows[3] != " ██" {
-		t.Errorf("bottom row = %q, want %q", rows[3], " ██")
-	}
-	// Fewer points than width right-align, keeping "now" against the axis.
-	rows, _ = areaChart([]float64{1}, 4, 2, 0, 1)
-	if !strings.HasSuffix(rows[0], "█") || !strings.HasPrefix(rows[0], "   ") {
-		t.Errorf("short series row = %q, want right-aligned", rows[0])
-	}
-	if rows, _ := areaChart([]float64{1}, 0, 2, 0, 1); rows != nil {
-		t.Error("zero width should render nothing")
-	}
-	// A degenerate scale must not divide by zero.
-	if rows, _ := areaChart([]float64{5}, 2, 2, 3, 3); len(rows) != 2 {
-		t.Error("zero-span scale broke the chart")
-	}
-}
-
-// TestChartColumnsCarryOwnValue locks the per-bar colouring in: the column
-// values must line up with the rendered runes, and each column must keep its
-// own band rather than inherit the latest reading's band.
-func TestChartColumnsCarryOwnValue(t *testing.T) {
-	rows, cols := areaChart([]float64{0.10, 0.95}, 4, 3, 0, 1)
-	if len(cols) != 4 {
-		t.Fatalf("got %d column values, want 4", len(cols))
-	}
-	for i, r := range rows {
-		if n := len([]rune(r)); n != len(cols) {
-			t.Errorf("row %d has %d runes but %d column values", i, n, len(cols))
-		}
-	}
-	// The series right-aligns, so the two pad columns come first.
-	if cols[2] != 0.10 || cols[3] != 0.95 {
-		t.Errorf("series columns = %v, want the values in order", cols[2:])
-	}
-	if loadBand(cols[2]) != 0 || loadBand(cols[3]) != 2 {
-		t.Errorf("bands = %d,%d, want 0,2 (the low bar must not turn red)",
-			loadBand(cols[2]), loadBand(cols[3]))
-	}
-	// Whatever the colouring, the glyphs must survive intact. Under a non-TTY
-	// test run lipgloss strips the escape codes, so this compares plain text.
-	if got := colorCols("▁▂▇█", cols); got != "▁▂▇█" {
-		t.Errorf("colorCols = %q, want the glyphs unchanged", got)
-	}
-	if got := colorCols("", nil); got != "" {
-		t.Errorf("colorCols of an empty row = %q, want empty", got)
-	}
-	// More runes than column values must not panic or drop glyphs.
-	if got := colorCols("███", []float64{0.9}); got != "███" {
-		t.Errorf("colorCols with short values = %q, want ███", got)
 	}
 }
 
@@ -442,5 +355,134 @@ func TestSaveTokenRejectsLineBreak(t *testing.T) {
 		if err := saveToken(bad); err == nil {
 			t.Errorf("saveToken(%q) was accepted; it would store a truncated token", bad)
 		}
+	}
+}
+
+// TestTimeChartGap checks the line chart's two promises: the x-axis covers the
+// whole window, and a stretch with no reading stays blank instead of drawing a
+// straight line across the hole.
+func TestTimeChartGap(t *testing.T) {
+	to := time.Now()
+	from := to.Add(-4 * time.Hour)
+	var vals []float64
+	var stamps []time.Time
+	// Two runs of readings, one at each end, with nothing in the middle two hours.
+	for i := 0; i < 6; i++ {
+		vals = append(vals, 0.2)
+		stamps = append(stamps, from.Add(time.Duration(i)*10*time.Minute))
+	}
+	for i := 0; i < 6; i++ {
+		vals = append(vals, 0.8)
+		stamps = append(stamps, from.Add(3*time.Hour+time.Duration(i)*10*time.Minute))
+	}
+
+	out := timeChart(oneLine(vals, stamps, loadBand), loadBands[:], from, to, 60, 12, 0, 1,
+		pct, xTimeFormatter(4*time.Hour))
+	rows := strings.Split(out, "\n")
+	if len(rows) < 6 {
+		t.Fatalf("timeChart drew %d rows, want the height it was given", len(rows))
+	}
+
+	// Column 30 of 60 sits in the hole, so no graph row may carry ink there.
+	// The last two rows are the axis and its labels, so stop before them.
+	for i, row := range rows[:len(rows)-2] {
+		r := []rune(row)
+		if len(r) <= 30 {
+			continue
+		}
+		if r[30] != ' ' {
+			t.Errorf("row %d drew %q in the hole, want a gap", i, string(r[30]))
+		}
+	}
+	// Ink must still exist on both sides of the hole.
+	if !strings.ContainsAny(out, "⠁⠂⠄⡀⢀⠈⠐⠠⠉⠒⠤⣀⠊⠔⠃⠋⣀⠒⠓⠛⠿⣿") {
+		t.Error("timeChart drew no braille at all")
+	}
+}
+
+// TestSeriesPaletteIsDistinct pins the overlay chart palette. A shade of the
+// text colour renders as near-white on a dark terminal, so a line drawn with it
+// reads as uncoloured while the legend still advertises a colour.
+func TestSeriesPaletteIsDistinct(t *testing.T) {
+	seen := map[lipgloss.TerminalColor]int{}
+	for i, s := range seriesPalette {
+		c := s.GetForeground()
+		if c == fg || c == dim {
+			t.Errorf("palette entry %d uses a text colour, which draws as uncoloured", i)
+		}
+		if c == positive || c == warnColor || c == negative {
+			t.Errorf("palette entry %d uses a threshold colour, which reads as a verdict", i)
+		}
+		seen[c]++
+	}
+	if len(seen) != len(seriesPalette) {
+		t.Errorf("palette has %d colours for %d entries, so two windows share a line colour",
+			len(seen), len(seriesPalette))
+	}
+}
+
+// TestTimeChartColorsSurviveAGap pins the styling of a segment that opens after
+// a hole. Such a segment keeps the band it had before the hole, and a rule that
+// styled a data set only on a band change left it on the library default, which
+// emits no colour at all and draws uncolored.
+//
+// The check walks every braille rune and asks which colour was active on it.
+// Counting the colours present is not enough: an unstyled segment adds no code,
+// so the set of colours still looks correct while half the line draws white.
+//
+// The colour profile has to be forced. A test run has no TTY, so lipgloss
+// strips every escape code and each style renders identically.
+func TestTimeChartColorsSurviveAGap(t *testing.T) {
+	old := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(old)
+
+	to := time.Now()
+	from := to.Add(-4 * time.Hour)
+	var vals []float64
+	var stamps []time.Time
+	// Two runs at the same low utilization, so both sit in band 0 and the whole
+	// line must come out one colour. The two hour hole between them breaks the
+	// line without changing the band.
+	for _, offset := range []time.Duration{0, 10, 20, 30, 180, 190, 200, 210} {
+		vals = append(vals, 0.2)
+		stamps = append(stamps, from.Add(offset*time.Minute))
+	}
+
+	out := timeChart(oneLine(vals, stamps, loadBand), loadBands[:], from, to, 60, 12, 0, 1,
+		pct, xTimeFormatter(4*time.Hour))
+
+	sgr := regexp.MustCompile("^\\x1b\\[[0-9;]*m")
+	code := func(s lipgloss.Style) string {
+		return regexp.MustCompile("\\x1b\\[[0-9;]*m").FindString(s.Render("x"))
+	}
+	want := code(positiveStyle) // band 0, where the whole series sits
+
+	// Walk the rendered chart, tracking which colour is in force, and record the
+	// colour every braille rune is drawn in.
+	active := ""
+	inked := map[string]int{}
+	for i := 0; i < len(out); {
+		if m := sgr.FindString(out[i:]); m != "" {
+			if m == "\x1b[0m" {
+				active = ""
+			} else {
+				active = m
+			}
+			i += len(m)
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(out[i:])
+		if r >= 0x2800 && r <= 0x28FF && r != 0x2800 {
+			inked[active]++
+		}
+		i += size
+	}
+
+	if len(inked) == 0 {
+		t.Fatal("the chart drew no braille, so this case proves nothing")
+	}
+	if len(inked) != 1 || inked[want] == 0 {
+		t.Errorf("braille drawn in %v, want every rune in the band 0 green %q", inked, want)
 	}
 }

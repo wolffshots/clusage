@@ -17,6 +17,12 @@ var (
 	dim       = lipgloss.AdaptiveColor{Light: "#6B7280", Dark: "#7A828E"}
 	fg        = lipgloss.AdaptiveColor{Light: "#1A1A1A", Dark: "#E5E7EB"}
 	warnColor = lipgloss.AdaptiveColor{Light: "#9A6700", Dark: "#FBBF24"}
+
+	// Hues for the overlay chart. They stay clear of green, amber and red, so no
+	// line on that chart reads as a threshold verdict.
+	seriesCyan = lipgloss.AdaptiveColor{Light: "#0E7490", Dark: "#22D3EE"}
+	seriesPink = lipgloss.AdaptiveColor{Light: "#BE185D", Dark: "#F472B6"}
+	seriesBlue = lipgloss.AdaptiveColor{Light: "#1D4ED8", Dark: "#60A5FA"}
 )
 
 var (
@@ -48,6 +54,20 @@ var (
 // loadBands are the utilization colour bands, lightest load first.
 var loadBands = [3]lipgloss.Style{positiveStyle, warnStyle, negativeStyle}
 
+// seriesPalette colours one chart line per window on the overlay chart. Every
+// entry is a distinct hue, never a shade of the text colour: fg renders as
+// near-white on a dark terminal, so a line painted with it reads as uncoloured
+// however carefully the legend advertises it.
+//
+// The entries also avoid green, amber and red, because those three carry the
+// threshold meaning everywhere else in the UI.
+var seriesPalette = []lipgloss.Style{
+	lipgloss.NewStyle().Foreground(accent),
+	lipgloss.NewStyle().Foreground(seriesCyan),
+	lipgloss.NewStyle().Foreground(seriesPink),
+	lipgloss.NewStyle().Foreground(seriesBlue),
+}
+
 // loadBand is the band a utilization fraction falls in: 0 under 60%, 1 under
 // 85%, 2 above. Chart code groups columns by band, which needs a comparable
 // value rather than a style.
@@ -66,30 +86,6 @@ func loadBand(frac float64) int {
 // red above. The same thresholds drive the gauges and the history lines so a
 // colour means one thing across the whole UI.
 func loadStyle(frac float64) lipgloss.Style { return loadBands[loadBand(frac)] }
-
-// colorCols paints a chart row one column at a time, so every bar carries the
-// colour of the value it shows. Colouring the whole chart by the newest reading
-// hid the history: a run that climbed from 5% to 95% came out all red.
-// Neighbouring columns in the same band share one escape sequence.
-func colorCols(row string, cols []float64) string {
-	runes := []rune(row)
-	band := func(i int) int {
-		if i >= len(cols) {
-			return 0
-		}
-		return loadBand(cols[i])
-	}
-	var b strings.Builder
-	for i := 0; i < len(runes); {
-		j := i + 1
-		for j < len(runes) && band(j) == band(i) {
-			j++
-		}
-		b.WriteString(loadBands[band(i)].Render(string(runes[i:j])))
-		i = j
-	}
-	return b.String()
-}
 
 // sustainableRate is the burn rate that spends a window exactly over its own
 // length, in percent per hour. A 5h window sustains 20 points per hour. A rate
@@ -117,30 +113,6 @@ func rateBand(rate, sustainable float64) int {
 	}
 }
 
-// colorRateCols paints a rate chart row one column at a time, the way
-// colorCols paints a utilization row, but banding by the sustainable rate
-// rather than by the utilization thresholds. Neighbouring columns in the same
-// band share one escape sequence, exactly as colorCols does.
-func colorRateCols(row string, cols []float64, sustainable float64) string {
-	runes := []rune(row)
-	band := func(i int) int {
-		if i >= len(cols) {
-			return 0
-		}
-		return rateBand(cols[i], sustainable)
-	}
-	var b strings.Builder
-	for i := 0; i < len(runes); {
-		j := i + 1
-		for j < len(runes) && band(j) == band(i) {
-			j++
-		}
-		b.WriteString(loadBands[band(i)].Render(string(runes[i:j])))
-		i = j
-	}
-	return b.String()
-}
-
 // contentWidth is the usable width for a chart, leaving room for the y-axis
 // labels and a little breathing space.
 func contentWidth(total, reserve int) int {
@@ -156,50 +128,48 @@ func contentWidth(total, reserve int) int {
 
 // ---- Now tab ---------------------------------------------------------------
 
-// nowView renders one gauge per rate limit window, plus the reset time and the
-// reading's age.
+// nowView renders one frame per rate limit window, each holding the gauge and
+// the window's status, reset time and burn rate.
 func (m model) nowView(height int) string {
 	wins := currentWindows(m)
 	if len(wins) == 0 {
 		return dimStyle.Render("no anthropic-ratelimit-* windows in the last reading")
 	}
 	now := time.Now()
-	barW := contentWidth(m.width, 34)
+	frameW := contentWidth(m.width, frameCols) + frameCols
+	// The gauge row is the bar, a space, and a 4 column percent label.
+	barW := contentWidth(m.width, frameCols+5)
 
 	var b strings.Builder
 	for i, w := range wins {
-		marker := "  "
+		title := valueStyle.Render(w.Name)
 		if i == m.selected {
-			marker = titleStyle.Render("▸ ")
+			title = titleStyle.Render("▸ " + w.Name)
 		}
-		name := valueStyle.Render(padRight(w.Name, 10))
+		if w.Status != "" {
+			title += "  " + statusDot(w.Status) + dimStyle.Render(" "+w.Status)
+		}
 
 		frac, ok := w.utilFrac()
 		if !ok {
-			b.WriteString(marker + name + dimStyle.Render("no utilization header") + "\n")
+			b.WriteString(frame(title, dimStyle.Render("no utilization header"), frameW) + "\n")
 			continue
 		}
 		style := loadStyle(frac)
-		bar := style.Render(gauge(frac, barW))
-		b.WriteString(marker + name + bar + " " + style.Render(padLeft(pct(frac), 4)) + "\n")
+		body := style.Render(gauge(frac, barW)) + " " + style.Render(padLeft(pct(frac), 4))
 
 		var meta []string
-		if w.Status != "" {
-			meta = append(meta, statusDot(w.Status)+" "+w.Status)
-		}
 		if t, ok := w.resetTime(); ok {
 			meta = append(meta, "resets "+t.Local().Format("Mon 15:04")+" ("+untilLabel(t, now)+")")
 		}
 		rate, rateOK := burnRate(m.history, w.Name, now)
 		meta = append(meta, burnLabel(rate, frac, rateOK))
-		if len(meta) > 0 {
-			b.WriteString("    " + dimStyle.Render(strings.Join(meta, "   ")) + "\n")
-		}
-		b.WriteString("\n")
+		body += "\n" + dimStyle.Render(strings.Join(meta, "   "))
+		b.WriteString(frame(title, body, frameW) + "\n")
 	}
 
 	age := now.Sub(m.latest.FetchedAt).Round(time.Second)
-	b.WriteString(dimStyle.Render("read " + age.String() + " ago  ·  " + m.latest.Model))
+	b.WriteString(dimStyle.Render("  read " + age.String() + " ago  ·  " + m.latest.Model))
 	return clip(b.String(), height)
 }
 
@@ -252,7 +222,8 @@ func untilLabel(t, now time.Time) string {
 // ---- History tab -----------------------------------------------------------
 
 // historyView graphs the selected window's utilization over the chosen span,
-// with a sparkline row per other window underneath for comparison.
+// its burn rate under that, and every window overlaid on one chart at the
+// bottom for comparison. Each is its own frame.
 func (m model) historyView(height int) string {
 	wins := currentWindows(m)
 	if len(wins) == 0 {
@@ -262,109 +233,101 @@ func (m model) historyView(height int) string {
 	span := historySpans[m.spanIdx]
 
 	series, stamps := utilSeries(m.history, sel.Name)
+	// The x-axis is the span itself, not the list of readings, so a column
+	// always means the same slice of time and a stretch with no reading draws
+	// as a gap.
+	to := time.Now()
+	from := to.Add(-span.dur)
 	if len(series) == 0 {
 		return titleStyle.Render(sel.Name+" utilization") + "  " + dimStyle.Render(span.label) +
 			"\n\n" + dimStyle.Render("no readings in this span — press r to fetch, or s for a longer span")
 	}
 
-	chartW := contentWidth(m.width, 10)
-	// Six rows below carry no chart: the title and its blank line, the x-axis
-	// and its blank line, and the summary and its blank line. Each window adds
-	// one sparkline row. What is left is the budget the two charts share, so
-	// the charts never push a sparkline row past clip.
-	budget := height - 6 - len(wins)
-	budget = clamp(budget, 3, 22)
+	chartW := contentWidth(m.width, frameCols)
+	frameW := chartW + frameCols
+	xFmt := xTimeFormatter(span.dur)
 
-	rateVals, _ := rateSeries(m.history, sel.Name)
-	// A rate block of rateH rows writes rateH+1 rows. The tall branch draws
-	// rateH-1 chart rows, a label row, and a blank line. The one row fallback
-	// draws a glyph row and a blank line. Take that extra row off the chart, so
-	// the block pays its true cost.
-	//
-	// The tall branch needs 3 chart rows, 4 rate rows, and that extra row, so
-	// it starts at a budget of 8. The fallback needs 3 chart rows plus 2, so it
-	// starts at 5. Under 5 the rate block is dropped.
-	chartH, rateH := budget, 0
+	rateVals, rateStamps := rateSeries(m.history, sel.Name)
+
+	// Height goes to the frames in order of how much each one earns. The
+	// utilization chart always draws, the burn rate next, and the overlay last,
+	// because the overlay only says something the top chart does not once there
+	// is more than one window.
+	avail := height - 1 // the summary line under the frames
+	utilH, rateH, winH := 0, 0, 0
 	switch {
-	case len(rateVals) == 0:
-		// nothing to draw
-	case budget >= 8:
-		rateH = budget / 3
-		if rateH < 4 {
-			rateH = 4
-		}
-		chartH = budget - rateH - 1
-	case budget >= 5:
-		rateH = 1
-		chartH = budget - 2
+	case avail >= 26:
+		rateH, winH = 5, 6
+	case avail >= 20:
+		rateH, winH = 4, 5
+	case avail >= 12:
+		rateH = 4
 	}
-	chartH = clamp(chartH, 3, 16)
+	if len(rateVals) == 0 {
+		rateH = 0
+	}
+	if len(wins) < 2 {
+		winH = 0
+	}
+	used := frameRows
+	if rateH > 0 {
+		used += rateH + frameRows
+	}
+	if winH > 0 {
+		used += winH + frameRows
+	}
+	utilH = clamp(avail-used, 4, 16)
 
-	style := loadStyle(series[len(series)-1])
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(sel.Name+" utilization") +
-		dimStyle.Render("   span ") + valueStyle.Render(span.label) +
-		dimStyle.Render("   tab switches window, s switches span") + "\n\n")
 
 	// Fixed 0..100% scale rather than min/max: the absolute distance to the
 	// limit is the point of this graph, so an autoscaled 40-to-42% band would
 	// read as a crisis.
-	rows, cols := areaChart(series, chartW, chartH, 0, 1)
-	for i, row := range rows {
-		axis := ""
-		switch i {
-		case 0:
-			axis = "100%"
-		case len(rows) - 1:
-			axis = "  0%"
-		case len(rows) / 2:
-			axis = " 50%"
-		}
-		b.WriteString(dimStyle.Render(padLeft(axis, 4)) + " " + colorCols(row, cols) + "\n")
-	}
-	b.WriteString(strings.Repeat(" ", 5) + dimStyle.Render(xAxis(stamps, chartW)) + "\n\n")
+	b.WriteString(frame(titleStyle.Render(sel.Name+" utilization")+
+		dimStyle.Render("  ·  span "+span.label),
+		timeChart(oneLine(series, stamps, loadBand), loadBands[:],
+			from, to, chartW, utilH, 0, 1, pct, xFmt),
+		frameW) + "\n")
 
-	// Both branches below run only when rateVals is non-empty, because the
-	// switch above leaves rateH at 0 otherwise. bounds() indexes vs[0] and
-	// panics on an empty slice, so that guard matters.
-	if rateH >= 4 {
+	if rateH > 0 {
 		sust := sustainableRate(sel.Name)
-		// areaChart scales between lo and hi, and falls back to a span of 1
-		// when hi-lo is not positive. A rate has no natural ceiling, so take
-		// the top from the data. A flat zero series gives top 0, which lands
-		// on that span-of-1 fallback and draws an empty chart, which is
-		// correct for a window that is not draining.
+		// A rate has no natural ceiling, so take the top from the data. A flat
+		// zero series gives top 0, and timeChart then draws every point on the
+		// floor, which is correct for a window that is not draining.
 		_, top := bounds(rateVals)
-		rows, cols := areaChart(rateVals, chartW, rateH-1, 0, top)
-		for i, row := range rows {
-			axis := ""
-			switch i {
-			case 0:
-				axis = pctPerHour(top)
-			case len(rows) - 1:
-				axis = "0"
+		b.WriteString(frame(titleStyle.Render("burn rate, %/h"),
+			timeChart(oneLine(rateVals, rateStamps, func(v float64) int {
+				return rateBand(v, sust)
+			}), loadBands[:], from, to, chartW, rateH, 0, top, pctPerHour, xFmt),
+			frameW) + "\n")
+	}
+
+	if winH > 0 {
+		var lines []chartLine
+		var names []string
+		for _, w := range wins {
+			s, st := utilSeries(m.history, w.Name)
+			if len(s) == 0 {
+				continue
 			}
-			b.WriteString(dimStyle.Render(padLeft(axis, 4)) + " " +
-				colorRateCols(row, cols, sust) + "\n")
+			// Each window takes one palette entry, so the band function ignores
+			// the value and answers with the series index. The index counts the
+			// lines drawn, not the windows read, because legend colours by
+			// position too. A window with no readings would otherwise shift
+			// every line off its own legend dot.
+			idx := len(lines) % len(seriesPalette)
+			lines = append(lines, chartLine{vals: s, stamps: st,
+				band: func(float64) int { return idx }})
+			names = append(names, w.Name)
 		}
-		b.WriteString(strings.Repeat(" ", 5) +
-			dimStyle.Render("burn rate, %/h") + "\n\n")
-	} else if rateH == 1 {
-		sust := sustainableRate(sel.Name)
-		// One areaChart row, not a sparkline, so the fallback keeps the same 0
-		// based scale as the tall branch. sparkline autoscales between the
-		// series min and max with no floor on the span, which draws a flat rate
-		// as a sawtooth of utilization rounding noise.
-		//
-		// areaChart pads a short series out to the full width, and this row
-		// carries a 12 column label against the chart's 5 column gutter. So
-		// draw 7 columns narrower, and the right edge lands under the chart's.
-		_, top := bounds(rateVals)
-		rows, cols := areaChart(rateVals, chartW-7, 1, 0, top)
-		b.WriteString("  " + dimStyle.Render(padRight("burn %/h", 10)) +
-			colorRateCols(rows[0], cols, sust) + "\n\n")
+		// The legend rides in the frame title, so the chart keeps the row it
+		// would otherwise spend on it.
+		b.WriteString(frame(titleStyle.Render("all windows")+"   "+legend(names, seriesPalette),
+			timeChart(lines, seriesPalette, from, to, chartW, winH, 0, 1, pct, xFmt),
+			frameW) + "\n")
 	}
 
+	style := loadStyle(series[len(series)-1])
 	min, max := bounds(series)
 	b.WriteString(labelStyle.Render("  min ") + valueStyle.Render(pct(min)) +
 		labelStyle.Render("  max ") + valueStyle.Render(pct(max)) +
@@ -379,23 +342,7 @@ func (m model) historyView(height int) string {
 		b.WriteString(labelStyle.Render("  burn ") +
 			valueStyle.Render(strconv.FormatFloat(rate, 'f', 1, 64)+"%/h"))
 	}
-	b.WriteString("\n\n")
-
-	for _, w := range wins {
-		s, _ := utilSeries(m.history, w.Name)
-		line := dimStyle.Render("(no data)")
-		if len(s) > 0 {
-			glyphs, vals := sparkline(s, chartW)
-			line = colorCols(glyphs, vals)
-		}
-		name := padRight(w.Name, 10)
-		if w.Name == sel.Name {
-			name = titleStyle.Render(name)
-		} else {
-			name = dimStyle.Render(name)
-		}
-		b.WriteString("  " + name + line + "\n")
-	}
+	b.WriteString(dimStyle.Render("   tab window, s span"))
 	return clip(b.String(), height)
 }
 
@@ -419,88 +366,88 @@ func utilSeries(readings []Reading, name string) ([]float64, []time.Time) {
 	return vals, stamps
 }
 
-// xAxis labels the first and last sample times under the chart.
-func xAxis(stamps []time.Time, width int) string {
-	if len(stamps) == 0 || width < 12 {
-		return ""
-	}
-	first := stamps[0].Local().Format("Mon 15:04")
-	last := stamps[len(stamps)-1].Local().Format("Mon 15:04")
-	gap := width - len(first) - len(last)
-	if gap < 1 {
-		return first
-	}
-	return first + strings.Repeat(" ", gap) + last
-}
-
 // ---- Tokens tab ------------------------------------------------------------
 
 // tokensView graphs what clusage itself spent on probe calls: a cumulative
-// total over the chosen span, a per-call sparkline, and the breakdown by
-// stream with the cached share.
+// total over the chosen span, the cost of each call, and the breakdown by
+// stream with the cached share. Each is its own frame.
 func (m model) tokensView(height int) string {
 	span := historySpans[m.spanIdx]
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("clusage token spend") +
-		dimStyle.Render("   span ") + valueStyle.Render(span.label) +
-		dimStyle.Render("   s switches span") + "\n\n")
 
 	if len(m.tokens) == 0 {
+		b.WriteString(titleStyle.Render("clusage token spend") +
+			dimStyle.Render("   span ") + valueStyle.Render(span.label) + "\n\n")
 		b.WriteString(dimStyle.Render("no calls in this span — press r to fetch, or s for a longer span") + "\n\n")
 		b.WriteString(m.tokenTotalsBlock())
 		return clip(b.String(), height)
 	}
 
 	cum, per, stamps := tokenSeries(m.tokens)
-	chartW := contentWidth(m.width, 12)
-	// Leave the 15 rows the title, the x-axis, the per-call line, the
-	// breakdown, and the all-time line need, so the chart never pushes the
-	// all-time total off the bottom.
-	chartH := clamp(height-15, 3, 14)
-
-	top := cum[len(cum)-1]
-	// Spend has no limit to sit under, so the token chart stays one colour;
-	// there is no band for a column to fall in.
-	rows, _ := areaChart(cum, chartW, chartH, 0, top)
-	for i, row := range rows {
-		axis := ""
-		switch i {
-		case 0:
-			axis = commas(int64(top + 0.5))
-		case len(rows) - 1:
-			axis = "0"
-		}
-		b.WriteString(dimStyle.Render(padLeft(axis, 6)) + " " + positiveStyle.Render(row) + "\n")
-	}
-	b.WriteString(strings.Repeat(" ", 7) + dimStyle.Render(xAxis(stamps, chartW)) + "\n\n")
-
-	perGlyphs, _ := sparkline(per, chartW)
-	b.WriteString("  " + labelStyle.Render(padRight("per call", 12)) +
-		valueStyle.Render(perGlyphs) + "\n\n")
+	chartW := contentWidth(m.width, frameCols)
+	frameW := chartW + frameCols
+	to := time.Now()
+	from := to.Add(-span.dur)
+	xFmt := xTimeFormatter(span.dur)
+	tokenLabel := func(v float64) string { return commas(int64(v + 0.5)) }
 
 	var spanTotal tokenUse
 	for _, s := range m.tokens {
 		spanTotal = spanTotal.add(s.Used)
 	}
-	b.WriteString(tokenBreakdown(spanTotal, len(m.tokens), span.label))
+	// A probe call is far under the cache minimum, so both cache rows read
+	// zero. A reader needs to know whether the counter is broken or the call is
+	// simply too small.
+	note := ""
 	if spanTotal.CacheRead == 0 && spanTotal.CacheCreate == 0 {
-		// A reader seeing two zero rows needs to know whether the counter is
-		// broken or the call is simply too small to cache.
-		b.WriteString(dimStyle.Render("  cache rows read 0 because a probe call is far under the ~1024 token cache minimum") + "\n")
+		note = dimStyle.Render(
+			"cache rows read 0: a probe call is far under the ~1024 token cache minimum")
 	}
-	b.WriteString("\n" + m.tokenTotalsBlock())
+
+	// The breakdown frame holds six rows, and the all-time total one. What is
+	// left goes to the two charts, with the per-call chart taking the smaller
+	// share: it answers "is a call getting dearer", which needs less height
+	// than the shape of the running total.
+	reserve := 6 + frameRows + 1
+	if note != "" {
+		reserve++
+	}
+	perH := 5
+	cumH := clamp(height-reserve-2*frameRows-perH, 4, 14)
+
+	// Spend has no limit to sit under, so a token chart carries one colour.
+	// There is no band for a value to fall in.
+	spend := []lipgloss.Style{positiveStyle}
+	b.WriteString(frame(titleStyle.Render("cumulative spend")+
+		dimStyle.Render("  ·  span "+span.label),
+		timeChart(oneLine(cum, stamps, solid), spend, from, to,
+			chartW, cumH, 0, cum[len(cum)-1], tokenLabel, xFmt),
+		frameW) + "\n")
+
+	_, perTop := bounds(per)
+	b.WriteString(frame(titleStyle.Render("per call"),
+		timeChart(oneLine(per, stamps, solid), spend, from, to,
+			chartW, perH, 0, perTop, tokenLabel, xFmt),
+		frameW) + "\n")
+
+	body := tokenBreakdown(spanTotal, len(m.tokens))
+	if note != "" {
+		body += "\n" + note
+	}
+	b.WriteString(frame(titleStyle.Render("last "+span.label), body, frameW) + "\n")
+	b.WriteString(m.tokenTotalsBlock())
 	return clip(b.String(), height)
 }
 
 // tokenBreakdown lists one row per token stream, plus the cached share and the
-// per-call average.
-func tokenBreakdown(u tokenUse, calls int, label string) string {
+// per-call average. The caller frames it, so it carries no title of its own and
+// ends without a line break.
+func tokenBreakdown(u tokenUse, calls int) string {
 	var b strings.Builder
 	row := func(name string, v int64) {
-		b.WriteString("  " + labelStyle.Render(padRight(name, 12)) +
+		b.WriteString(labelStyle.Render(padRight(name, 12)) +
 			valueStyle.Render(padLeft(commas(v), 10)) + "\n")
 	}
-	b.WriteString("  " + titleStyle.Render("last "+label) + "\n")
 	row("input", u.Input)
 	row("output", u.Output)
 	row("cache write", u.CacheCreate)
@@ -510,10 +457,10 @@ func tokenBreakdown(u tokenUse, calls int, label string) string {
 	if calls > 0 {
 		avg = u.total() / int64(calls)
 	}
-	b.WriteString("  " + labelStyle.Render(padRight("calls", 12)) +
+	b.WriteString(labelStyle.Render(padRight("calls", 12)) +
 		valueStyle.Render(padLeft(itoa(calls), 10)) +
 		labelStyle.Render("   avg ") + valueStyle.Render(commas(avg)+"/call") +
-		labelStyle.Render("   cached ") + valueStyle.Render(pct(u.cachedFrac())+" of input") + "\n")
+		labelStyle.Render("   cached ") + valueStyle.Render(pct(u.cachedFrac())+" of input"))
 	return b.String()
 }
 
@@ -550,68 +497,83 @@ func tokenSeries(ss []TokenSample) (cum, per []float64, stamps []time.Time) {
 // configView shows the effective config and what the schedule will do next.
 // Editing happens in the file; the TUI only reports.
 func (m model) configView() string {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("Config") + "\n\n")
+	frameW := contentWidth(m.width, frameCols) + frameCols
 
-	// raw takes a value that carries its own styling, row styles a plain one.
-	raw := func(label, value string) {
-		b.WriteString("  " + labelStyle.Render(padRight(label, 18)) + value + "\n")
+	// rows lays out one "label value" line per pair. The value carries its own
+	// styling, so a row can report a state in colour.
+	rows := func(pairs ...[2]string) string {
+		var lines []string
+		for _, p := range pairs {
+			lines = append(lines, labelStyle.Render(padRight(p[0], 18))+p[1])
+		}
+		return strings.Join(lines, "\n")
 	}
-	row := func(label, value string) { raw(label, valueStyle.Render(value)) }
-	row("model", m.cfg.Model)
-	row("threshold", itoa(m.cfg.ThresholdMinutes)+"m")
-	row("history window", itoa(m.cfg.HistoryHours)+"h")
+	val := valueStyle.Render
 
-	b.WriteString("\n")
+	var b strings.Builder
+	b.WriteString(frame(titleStyle.Render("runtime"), rows(
+		[2]string{"model", val(m.cfg.Model)},
+		[2]string{"threshold", val(itoa(m.cfg.ThresholdMinutes) + "m")},
+		[2]string{"history window", val(itoa(m.cfg.HistoryHours) + "h")},
+	), frameW) + "\n")
+
+	var schedule string
 	if !cronValid(m.cfg.FetchCron) {
 		label := m.cfg.FetchCron
 		if strings.TrimSpace(label) == "" {
 			label = "(unset)"
 		}
-		raw("fetch_cron", errorStyle.Render(label)+
-			dimStyle.Render("  needs 5 fields per expression, ; separates several"))
-		raw("auto-fetch", dimStyle.Render("disabled"))
+		schedule = rows(
+			[2]string{"fetch_cron", errorStyle.Render(label) +
+				dimStyle.Render("  needs 5 fields per expression, ; separates several")},
+			[2]string{"auto-fetch", dimStyle.Render("disabled")},
+		)
 	} else {
-		row("fetch_cron", m.cfg.FetchCron)
 		state := positiveStyle.Render("on")
 		if !m.autoFetch {
 			state = warnStyle.Render("paused (a resumes)")
 		}
-		raw("auto-fetch", state)
 		next := dimStyle.Render("never")
 		if t, ok := nextFetch(m.cfg, time.Now()); ok {
-			next = valueStyle.Render(t.Local().Format("Mon 15:04")) +
+			next = val(t.Local().Format("Mon 15:04")) +
 				dimStyle.Render("  ("+untilLabel(t, time.Now())+")")
 		}
-		raw("next fetch", next)
+		schedule = rows(
+			[2]string{"fetch_cron", val(m.cfg.FetchCron)},
+			[2]string{"auto-fetch", state},
+			[2]string{"next fetch", next},
+		)
 	}
+	b.WriteString(frame(titleStyle.Render("schedule"), schedule, frameW) + "\n")
 
 	// The guard rail runs as a shell hook, and a CLUSAGE_GUARD_* variable
 	// overrides the file for one session. Report what the hook would apply,
 	// not what the file says, and name the variables that took over.
 	g, over := effectiveGuard(m.cfg.Guard)
-	b.WriteString("\n  " + labelStyle.Render("guard rail"))
+	guardTitle := titleStyle.Render("guard rail")
 	if len(over) > 0 {
-		b.WriteString(dimStyle.Render("        env: " + strings.Join(over, ", ")))
+		guardTitle += dimStyle.Render("   env: " + strings.Join(over, ", "))
 	}
-	b.WriteString("\n")
-	row("cuts", "5h "+itoa(g.Soft5h)+"%   7d "+itoa(g.Hard7d)+"%")
-	row("check every", itoa(g.Interval)+"s idle, "+itoa(g.IntervalMin)+
-		"s near a cut, "+itoa(g.Poll)+"s while paused")
-	raw("max wait", valueStyle.Render(itoa(g.MaxWait)+"s, then deny")+
-		dimStyle.Render("   overage ")+overageLabel(g.AllowOverage))
-	row("allow tools", strings.Join(g.AllowTools, ", "))
-	raw("hook", hookLabel(m.guard))
+	b.WriteString(frame(guardTitle, rows(
+		[2]string{"cuts", val("5h " + itoa(g.Soft5h) + "%   7d " + itoa(g.Hard7d) + "%")},
+		[2]string{"check every", val(itoa(g.Interval) + "s idle, " + itoa(g.IntervalMin) +
+			"s near a cut, " + itoa(g.Poll) + "s while paused")},
+		[2]string{"max wait", val(itoa(g.MaxWait)+"s, then deny") +
+			dimStyle.Render("   overage ") + overageLabel(g.AllowOverage)},
+		[2]string{"allow tools", val(strings.Join(g.AllowTools, ", "))},
+		[2]string{"hook", hookLabel(m.guard)},
+	), frameW) + "\n")
 
-	b.WriteString("\n")
-	row("config file", tilde(m.cfgPath))
-	row("database", tilde(m.dbPath))
-	raw("token", tokenLabel(m.hasToken))
-	row("version", version)
+	b.WriteString(frame(titleStyle.Render("paths"), rows(
+		[2]string{"config file", val(tilde(m.cfgPath))},
+		[2]string{"database", val(tilde(m.dbPath))},
+		[2]string{"token", tokenLabel(m.hasToken)},
+		[2]string{"version", val(version)},
+	), frameW) + "\n")
 
-	b.WriteString("\n" + dimStyle.Render("  Edit the file and restart to change these. Cron fields: minute hour") + "\n")
+	b.WriteString(dimStyle.Render("  Edit the file and restart to change these. Cron fields: minute hour") + "\n")
 	b.WriteString(dimStyle.Render("  day-of-month month day-of-week, e.g. \"*/15 * * * *\" every 15 minutes,") + "\n")
-	b.WriteString(dimStyle.Render("  \"0 9-17 * * 1-5\" weekday work hours, \"5 9 * * *;35 18 * * *\" twice a day.") + "\n")
+	b.WriteString(dimStyle.Render("  \"0 9-17 * * 1-5\" weekday work hours, \"5 9 * * *;35 18 * * *\" twice a day."))
 	return b.String()
 }
 

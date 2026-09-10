@@ -140,18 +140,22 @@ fewer readings than the 7d window smooths over, so the Now tab can show a
 coarser 7d rate than `clusage usage`, or `burn -` where the command prints a
 number. Widen the span to compare the two.
 
-**History** graphs the selected window over the chosen span, with a sparkline
-per window underneath for comparison. The scale is fixed at 0 to 100% rather
-than autoscaled, because a week that sat between 40% and 42% would otherwise
-render as a crisis.
+**History** holds three framed charts. The top one graphs the selected window
+over the chosen span. Its scale is fixed at 0 to 100% rather than autoscaled,
+because a week that sat between 40% and 42% would otherwise render as a crisis.
+The middle one graphs the burn rate on its own `%/h` scale, because a rate has
+no natural ceiling. The bottom one overlays every window on one axis, with a
+colour per window in the frame title. A short terminal drops the overlay first
+and the rate chart last, so the help footer always stays visible.
 
-**History** graphs the burn rate under the utilization chart, on its own
-`%/h` scale, because a rate has no natural ceiling. A short terminal drops the
-rate chart to a single sparkline row, and a very short one drops it entirely,
-so the help footer always stays visible.
+Every chart draws braille lines against a uniform time axis. A column is a
+fixed slice of the span, so an irregular poll never stretches the picture. A
+line breaks where the gap between readings runs well past that series own
+typical spacing, so a stretch with no reading draws as a gap rather than as a
+straight line across the hole.
 
 **Tokens** graphs what clusage spent on its own probe calls: a cumulative
-total over the chosen span, a per-call sparkline, and the breakdown into input,
+total over the chosen span, the cost of each call, and the breakdown into input,
 output, cache write and cache read. The all-time total is not limited by the
 span.
 
