@@ -133,9 +133,14 @@ Point the Claude Code status line at clusage in `~/.claude/settings.json`:
 
 Then set `"source": "statusline"` in `config.json`. No token is needed.
 
-The command prints `5h 23% · 7d 41%` and stores a reading whenever the numbers
-change, or once a minute while they hold. It replaces any status line you
-already have.
+The command prints `5h 23% · 7d 41%` and stores a reading only when the numbers
+change. It replaces any status line you already have.
+
+A session updates its numbers only when it gets an API response. An idle session
+repeats its last numbers, and clusage does not store the repeats. The age of the
+last reading is therefore the age of the numbers. `auto` skips a status line
+reading older than `threshold_minutes`. Usage in Claude Desktop or another
+session reaches the status line only after this session makes a call.
 
 Claude Code drops a window from the status line once it resets. Clusage then
 records that window at 0%, so the guard rail never reads a missing 5h row as

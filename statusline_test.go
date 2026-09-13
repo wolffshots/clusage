@@ -1,9 +1,71 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
+
+// An idle session repeats its last numbers on every status line run. A repeat
+// must not store a row, or its fresh timestamp passes stale numbers off as new
+// to auto.
+func TestStatuslineStoresOnlyChanges(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	run := func(input string) {
+		t.Helper()
+		f, err := os.CreateTemp(t.TempDir(), "stdin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.WriteString(input)
+		f.Seek(0, 0)
+		old := os.Stdin
+		os.Stdin = f
+		defer func() { os.Stdin = old; f.Close() }()
+		captureStdout(t, func() {
+			if err := statusline(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	rows := func() int {
+		t.Helper()
+		db, err := openDB()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var n int
+		db.QueryRow(`SELECT COUNT(*) FROM readings WHERE model = ?`, statuslineModel).Scan(&n)
+		return n
+	}
+	a := `{"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":4000000000}}}`
+
+	run(a)
+	if n := rows(); n != 1 {
+		t.Fatalf("first run: %d rows, want 1", n)
+	}
+	// Age the row past the old once-a-minute restate, then put a usage reading
+	// on top. Neither may make the same numbers count as new.
+	db, err := openDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Exec(`UPDATE readings SET fetched_at = ?`, time.Now().Add(-10*time.Minute).UTC().Format(time.RFC3339Nano))
+	saveReading(db, Reading{FetchedAt: time.Now(), Model: usageAPIModel, Headers: map[string]string{
+		"anthropic-ratelimit-unified-5h-utilization": "0.2",
+	}})
+	db.Close()
+	run(a)
+	if n := rows(); n != 1 {
+		t.Fatalf("repeat: %d rows, want 1", n)
+	}
+	run(strings.Replace(a, "12", "13", 1))
+	if n := rows(); n != 2 {
+		t.Fatalf("change: %d rows, want 2", n)
+	}
+}
 
 func TestStatuslineHeaders(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)

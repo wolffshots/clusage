@@ -106,9 +106,21 @@ func statusline() error {
 		// whole session, and an early run without rate limits is expected.
 		return err
 	}
-	// Claude Code reruns the status line on every event, often a few times a
-	// second. Only a change, or a minute of quiet, earns a row.
-	if !sameHeaders(prev.Headers, h) || now.Sub(prev.FetchedAt) >= time.Minute {
+	// Claude Code reruns the status line on every event and on a refresh timer,
+	// but the numbers only move with an API response from this session. An idle
+	// session repeats its last numbers, so only a change earns a row. The row's
+	// age then says how old the numbers are, which is what auto checks.
+	//
+	// The comparison is against the last status line row, not the last row of
+	// any source, so a usage or probe reading in between does not make the
+	// repeat look new.
+	// ponytail: two sessions with different numbers still alternate rows; key
+	// rows by session_id if that shows up.
+	lastSL, _, err := latestReadingFrom(db, statuslineModel)
+	if err != nil {
+		return err
+	}
+	if !sameHeaders(lastSL.Headers, h) {
 		if err := saveReading(db, Reading{FetchedAt: now, Model: statuslineModel, Headers: h}); err != nil {
 			return err
 		}
