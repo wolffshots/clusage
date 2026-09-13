@@ -81,6 +81,11 @@ func statuslineHeaders(raw []byte, prev Reading, now time.Time) (map[string]stri
 // status line command, hands it the session JSON on stdin, and shows what it
 // prints. It stores a reading when the numbers changed, then prints the windows.
 func statusline() error {
+	// Run by hand, stdin is the terminal and ReadAll would wait for an EOF
+	// nobody sends. Say what the command is for instead.
+	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		return fmt.Errorf(`statusline reads the JSON Claude Code sends on stdin: set "statusLine" in ~/.claude/settings.json to {"type": "command", "command": "clusage statusline"}, see the README`)
+	}
 	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return err
