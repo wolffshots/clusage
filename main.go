@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -94,9 +95,14 @@ func readTokenLine(r io.Reader) (string, error) {
 }
 
 func usage(args []string) error {
-	cfg, _, err := loadConfig()
+	cfg, cfgPath, err := loadConfig()
 	if err != nil {
 		return err
+	}
+	// Checked before the cache, so an unset source is reported even while a
+	// stored reading is fresh enough to print.
+	if !slices.Contains(sources, cfg.Source) {
+		return errNoSource(cfgPath, cfg.Source)
 	}
 	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
 	model := fs.String("model", cfg.Model, "model to ping")
@@ -121,34 +127,22 @@ func usage(args []string) error {
 	// The rate column needs history. Seven days covers the longest window's
 	// smoothing horizon, and these rows are small.
 	hist := loadHistory(db, now.Add(-7*24*time.Hour))
-	// In status line mode there is nothing to call. The last stored reading is
-	// the answer, however old, and -force has nothing to force.
-	if cfg.Source == "statusline" {
-		if !ok {
-			return fmt.Errorf("no status line reading yet, see clusage statusline in the README")
-		}
-		report(last, hist, now, true, *verbose)
-		return nil
-	}
 	if ok && !*force && now.Sub(last.FetchedAt) < time.Duration(*threshold)*time.Minute {
 		report(last, hist, now, true, *verbose)
 		return nil
 	}
 
-	token, err := loadToken()
-	if err != nil {
-		return err
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	headers, used, err := fetchUsage(ctx, token, *model)
+	cfg.ThresholdMinutes = *threshold
+	r, used, fresh, err := readUsage(ctx, db, cfg, cfgPath, *model)
 	if err != nil {
 		return err
 	}
-	if len(headers) == 0 {
-		return fmt.Errorf("no usable anthropic-ratelimit-unified-* headers on the response")
+	if !fresh {
+		report(r, hist, now, true, *verbose)
+		return nil
 	}
-	r := Reading{FetchedAt: time.Now(), Model: *model, Headers: headers}
 	// The report goes out before the writes. The API call is already paid for,
 	// and the guard rail hook reads this output, so a failed write must not
 	// swallow the numbers.
@@ -157,8 +151,12 @@ func usage(args []string) error {
 	if err := saveReading(db, r); err != nil {
 		fmt.Fprintln(os.Stderr, "clusage: save reading:", err)
 	}
-	if err := saveTokens(db, TokenSample{CalledAt: r.FetchedAt, Model: *model, Used: used}); err != nil {
-		fmt.Fprintln(os.Stderr, "clusage: save tokens:", err)
+	// Only the probe bills tokens. A usage endpoint reading or a rejected probe
+	// has no usage block, and a zero sample would count a call that cost nothing.
+	if used.total() > 0 {
+		if err := saveTokens(db, TokenSample{CalledAt: r.FetchedAt, Model: *model, Used: used}); err != nil {
+			fmt.Fprintln(os.Stderr, "clusage: save tokens:", err)
+		}
 	}
 	if *verbose {
 		total, calls, err := tokenTotals(db)

@@ -8,26 +8,38 @@ resets, and how the usage moved over the last hours or days.
 
 ## Sources
 
-Clusage reads the limits from one of two places. Set `source` in `config.json`.
-The status line is the preferred setup.
+Clusage reads the limits from one of three places. Set `source` in
+`config.json`. **The status line is the recommended source.** It needs no
+token and makes no API call.
 
 | `source` | Where the numbers come from | Needs |
 |---|---|---|
-| `statusline` (preferred) | The `rate_limits` field Claude Code hands its status line command | Claude Code v2.1.80 or later, a Pro or Max plan |
-| `token` | A probe call to the API, see [How the token source works](#how-the-token-source-works) | A token from `claude setup-token` |
+| `statusline` (recommended) | The `rate_limits` field Claude Code hands its status line command | Claude Code v2.1.80 or later, a Pro or Max plan |
+| `usage` | The account usage endpoint that Claude Code's `/usage` panel reads | A token from `claude setup-token` |
+| `probe` | A probe call to the API, see [How the probe works](#how-the-probe-works) | A token from `claude setup-token` |
+| `auto` | `usage`, then `statusline`, then `probe`, the first that answers | Whatever the step it lands on needs |
 
-The `statusline` source makes no API call and stores no token. It only updates
-while a Claude Code session runs, and only after that session's first
-response, so the TUI can show an older reading. It reports the 5h and 7d
-windows, not the Opus-only or overage windows.
+There is no default. Until `source` is set, a reading fails with an error that
+names the four choices. The TUI still opens, and the Config tab marks the
+field.
 
-The `token` source reads every window, including Opus-only and overage, and
-works with no Claude Code session open. Each reading costs one small API call.
+The `statusline` source only updates while a Claude Code session runs, and only
+after that session's first response. It reports the 5h and 7d windows, not the
+Opus-only or overage windows.
 
-A config written by an older clusage has no `source` field, and reads as
-`token`, so an upgrade changes nothing until you switch.
+The `usage` source reads every window, including Opus-only and overage, makes
+no inference call, and works with no Claude Code session open. The endpoint is
+undocumented and often answers 429, so clusage never retries it.
 
-## How the token source works
+The `probe` source also reads every window and needs no session, but each
+reading costs one small inference call.
+
+`auto` takes a status line reading only if it is newer than
+`threshold_minutes`, because a stale 5h number would mislead the guard rail.
+The explicit `statusline` source takes the last reading however old. When every
+step fails, the error names why each one did.
+
+## How the probe works
 
 The Anthropic API reports your remaining budget in `anthropic-ratelimit-*`
 response headers. There is no endpoint that returns them on their own, so
@@ -110,7 +122,7 @@ platforms. Everything else works on all three.
 
 ## Setup
 
-### Status line (preferred)
+### Status line (recommended)
 
 Point the Claude Code status line at clusage in `~/.claude/settings.json`:
 
@@ -132,8 +144,10 @@ unknown usage.
 
 ### Token
 
-The token source needs a Claude Code OAuth token. Generate one with the Claude
-Code CLI, which requires an active Claude subscription:
+The `usage`, `probe` and `auto` sources need a Claude Code OAuth token. For
+`auto`, set up the status line too, so a refused usage endpoint falls back to
+it before it costs a probe. Generate the token with the Claude Code CLI, which
+requires an active Claude subscription:
 
 ```sh
 claude setup-token
@@ -479,7 +493,7 @@ Keep `CLUSAGE_GUARD_MAXWAIT` under the hook timeout in `settings.json`. Install
 sets that timeout 15 seconds above the maximum wait. A hook that times out lets
 the tool call through.
 
-A poll reads a new probe every time, so a pause costs one small API call per
+A poll reads the source again every time, so a pause can cost one small API call per
 `CLUSAGE_GUARD_POLL` seconds.
 
 ## Stale resume report
@@ -515,11 +529,12 @@ Clusage writes `config.json` on first run, at `~/.config/clusage/config.json`
 (or under `XDG_CONFIG_HOME` when that is set). The SQLite file sits beside it as
 `clusage.db`.
 
-The file names every field, so nothing is hidden behind a default:
+The file names every field, so nothing is hidden behind a default. `source`
+starts empty on purpose, so pick one before the first reading:
 
 ```json
 {
-  "source": "token",
+  "source": "",
   "model": "claude-haiku-4-5",
   "threshold_minutes": 5,
   "fetch_cron": "*/15 * * * *",
@@ -543,8 +558,8 @@ The file names every field, so nothing is hidden behind a default:
 
 | Field | Meaning |
 |---|---|
-| `source` | `token` or `statusline`. See [Sources](#sources). |
-| `model` | Which model to ping. Cheaper models report the same headers. Ignored by `statusline`. |
+| `source` | `statusline`, `usage`, `probe` or `auto`. Required. See [Sources](#sources). |
+| `model` | Which model the probe pings. Cheaper models report the same headers. |
 | `threshold_minutes` | How long `clusage usage` reuses a cached reading. |
 | `fetch_cron` | Schedule for the automatic fetch. Empty disables it. |
 | `history_hours` | How far back the history graphs may read. |

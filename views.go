@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -512,6 +513,7 @@ func (m model) configView() string {
 
 	var b strings.Builder
 	b.WriteString(frame(titleStyle.Render("runtime"), rows(
+		[2]string{"source", sourceLabel(m.cfg.Source)},
 		[2]string{"model", val(m.cfg.Model)},
 		[2]string{"threshold", val(itoa(m.cfg.ThresholdMinutes) + "m")},
 		[2]string{"history window", val(itoa(m.cfg.HistoryHours) + "h")},
@@ -613,6 +615,13 @@ func tilde(p string) string {
 }
 
 // tokenLabel reports whether a probe can run at all.
+func sourceLabel(s string) string {
+	if !slices.Contains(sources, s) {
+		return warnStyle.Render("not set  (" + strings.Join(sources, ", ") + ")")
+	}
+	return valueStyle.Render(s)
+}
+
 func tokenLabel(has bool) string {
 	if has {
 		return positiveStyle.Render("in the login keychain")

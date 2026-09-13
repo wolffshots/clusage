@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -200,48 +199,32 @@ func (m model) cronTick() tea.Cmd {
 	})
 }
 
-// fetchCmd calls the API off the UI goroutine. auto marks a scheduled fetch,
-// whose failure is flagged on the tab bar instead of taking over the body.
-func fetchCmd(db *sql.DB, source, model string, auto bool) tea.Cmd {
+// fetchCmd reads the configured source off the UI goroutine. auto marks a
+// scheduled fetch, whose failure is flagged on the tab bar instead of taking
+// over the body.
+func fetchCmd(db *sql.DB, cfg Config, cfgPath string, auto bool) tea.Cmd {
 	return func() tea.Msg {
-		// In status line mode a fetch rereads the database, which the status
-		// line command keeps current while a Claude Code session runs.
-		if source == "statusline" {
-			r, ok, err := latestReading(db)
-			if err != nil {
-				return fetchErrMsg{err: err, auto: auto}
-			}
-			if !ok {
-				return fetchErrMsg{err: fmt.Errorf("no status line reading yet"), auto: auto}
-			}
-			return fetchedMsg{r: r, auto: auto, at: time.Now()}
-		}
-		token, err := loadToken()
-		if err != nil {
-			return fetchErrMsg{err: err, auto: auto}
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 		defer cancel()
-		headers, used, err := fetchUsage(ctx, token, model)
+		r, used, fresh, err := readUsage(ctx, db, cfg, cfgPath, cfg.Model)
 		if err != nil {
 			return fetchErrMsg{err: err, auto: auto}
 		}
-		if len(headers) == 0 {
-			return fetchErrMsg{err: fmt.Errorf("no anthropic-ratelimit-* headers on the response"), auto: auto}
-		}
-		r := Reading{FetchedAt: time.Now(), Model: model, Headers: headers}
-		if err := saveReading(db, r); err != nil {
-			return fetchErrMsg{err: err, auto: auto}
+		// A status line reading is already stored. Only a live one is new.
+		if fresh {
+			if err := saveReading(db, r); err != nil {
+				return fetchErrMsg{err: err, auto: auto}
+			}
 		}
 		// A rejected call bills nothing, so it has no usage block. Recording a
 		// zero sample would add a flat point to the token chart and count a
 		// call that cost nothing.
 		if used.total() > 0 {
-			if err := saveTokens(db, TokenSample{CalledAt: r.FetchedAt, Model: model, Used: used}); err != nil {
+			if err := saveTokens(db, TokenSample{CalledAt: r.FetchedAt, Model: cfg.Model, Used: used}); err != nil {
 				return fetchErrMsg{err: err, auto: auto}
 			}
 		}
-		return fetchedMsg{r: r, auto: auto, at: r.FetchedAt}
+		return fetchedMsg{r: r, auto: auto, at: time.Now()}
 	}
 }
 
@@ -337,7 +320,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastCron = minute
 		m.fetching = true
-		return m, tea.Batch(m.spin.Tick, fetchCmd(m.db, m.cfg.Source, m.cfg.Model, true), m.cronTick())
+		return m, tea.Batch(m.spin.Tick, fetchCmd(m.db, m.cfg, m.cfgPath, true), m.cronTick())
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -360,7 +343,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.fetching = true
 		m.err = nil
-		return m, tea.Batch(m.spin.Tick, fetchCmd(m.db, m.cfg.Source, m.cfg.Model, false))
+		return m, tea.Batch(m.spin.Tick, fetchCmd(m.db, m.cfg, m.cfgPath, false))
 
 	case key.Matches(msg, m.keys.Auto):
 		m.autoFetch = !m.autoFetch

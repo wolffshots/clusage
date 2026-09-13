@@ -17,8 +17,10 @@ import (
 const keychainService = "clusage"
 
 type Config struct {
-	// Source is where readings come from: "token" probes the API with a stored
-	// token, "statusline" reads what "clusage statusline" stored. Empty is token.
+	// Source is where readings come from: "statusline" reads what "clusage
+	// statusline" stored, "usage" reads the OAuth usage endpoint, "probe" sends
+	// a probe call, and "auto" tries usage, statusline, probe in that order.
+	// It has no default: readUsage refuses to run until it is set.
 	Source           string `json:"source"`
 	Model            string `json:"model"`
 	ThresholdMinutes int    `json:"threshold_minutes"`
@@ -56,7 +58,6 @@ type Guard struct {
 }
 
 var defaultConfig = Config{
-	Source:           "token",
 	Model:            "claude-haiku-4-5",
 	ThresholdMinutes: 5,
 	FetchCron:        "*/15 * * * *",
@@ -333,8 +334,15 @@ func saveReading(db *sql.DB, r Reading) error {
 
 // latestReading returns the newest cached reading, or ok=false when the table is empty.
 func latestReading(db *sql.DB) (Reading, bool, error) {
-	var ts, model, blob string
-	err := db.QueryRow(`SELECT fetched_at, model, headers FROM readings ORDER BY id DESC LIMIT 1`).
+	return latestReadingFrom(db, "")
+}
+
+// latestReadingFrom returns the newest reading stored under model, or the
+// newest of any when model is empty.
+func latestReadingFrom(db *sql.DB, model string) (Reading, bool, error) {
+	var ts, blob string
+	err := db.QueryRow(`SELECT fetched_at, model, headers FROM readings
+		WHERE ? = '' OR model = ? ORDER BY id DESC LIMIT 1`, model, model).
 		Scan(&ts, &model, &blob)
 	if err == sql.ErrNoRows {
 		return Reading{}, false, nil
