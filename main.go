@@ -45,10 +45,12 @@ func run(args []string) error {
 		return hook(args)
 	case "guard-config":
 		return guardConfig()
+	case "statusline":
+		return statusline()
 	case "tui":
 		return runTUI()
 	default:
-		return fmt.Errorf("unknown command %q (want: tui, setup, usage, hook, guard-config)", cmd)
+		return fmt.Errorf("unknown command %q (want: tui, setup, usage, statusline, hook, guard-config)", cmd)
 	}
 }
 
@@ -119,6 +121,15 @@ func usage(args []string) error {
 	// The rate column needs history. Seven days covers the longest window's
 	// smoothing horizon, and these rows are small.
 	hist := loadHistory(db, now.Add(-7*24*time.Hour))
+	// In status line mode there is nothing to call. The last stored reading is
+	// the answer, however old, and -force has nothing to force.
+	if cfg.Source == "statusline" {
+		if !ok {
+			return fmt.Errorf("no status line reading yet, see clusage statusline in the README")
+		}
+		report(last, hist, now, true, *verbose)
+		return nil
+	}
 	if ok && !*force && now.Sub(last.FetchedAt) < time.Duration(*threshold)*time.Minute {
 		report(last, hist, now, true, *verbose)
 		return nil

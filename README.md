@@ -6,7 +6,28 @@ resets, and how the usage moved over the last hours or days.
 
 ![The clusage TUI: a gauge per limit window on the Now tab, the 5h and 7d windows graphed on the History tab, then the Tokens and Config tabs.](demo/clusage.gif)
 
-## How it works
+## Sources
+
+Clusage reads the limits from one of two places. Set `source` in `config.json`.
+The status line is the preferred setup.
+
+| `source` | Where the numbers come from | Needs |
+|---|---|---|
+| `statusline` (preferred) | The `rate_limits` field Claude Code hands its status line command | Claude Code v2.1.80 or later, a Pro or Max plan |
+| `token` | A probe call to the API, see [How the token source works](#how-the-token-source-works) | A token from `claude setup-token` |
+
+The `statusline` source makes no API call and stores no token. It only updates
+while a Claude Code session runs, and only after that session's first
+response, so the TUI can show an older reading. It reports the 5h and 7d
+windows, not the Opus-only or overage windows.
+
+The `token` source reads every window, including Opus-only and overage, and
+works with no Claude Code session open. Each reading costs one small API call.
+
+A config written by an older clusage has no `source` field, and reads as
+`token`, so an upgrade changes nothing until you switch.
+
+## How the token source works
 
 The Anthropic API reports your remaining budget in `anthropic-ratelimit-*`
 response headers. There is no endpoint that returns them on their own, so
@@ -89,8 +110,30 @@ platforms. Everything else works on all three.
 
 ## Setup
 
-Clusage needs a Claude Code OAuth token. Generate one with the Claude Code CLI,
-which requires an active Claude subscription:
+### Status line (preferred)
+
+Point the Claude Code status line at clusage in `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": { "type": "command", "command": "clusage statusline" }
+}
+```
+
+Then set `"source": "statusline"` in `config.json`. No token is needed.
+
+The command prints `5h 23% · 7d 41%` and stores a reading whenever the numbers
+change, or once a minute while they hold. It replaces any status line you
+already have.
+
+Claude Code drops a window from the status line once it resets. Clusage then
+records that window at 0%, so the guard rail never reads a missing 5h row as
+unknown usage.
+
+### Token
+
+The token source needs a Claude Code OAuth token. Generate one with the Claude
+Code CLI, which requires an active Claude subscription:
 
 ```sh
 claude setup-token
@@ -476,6 +519,7 @@ The file names every field, so nothing is hidden behind a default:
 
 ```json
 {
+  "source": "token",
   "model": "claude-haiku-4-5",
   "threshold_minutes": 5,
   "fetch_cron": "*/15 * * * *",
@@ -499,7 +543,8 @@ The file names every field, so nothing is hidden behind a default:
 
 | Field | Meaning |
 |---|---|
-| `model` | Which model to ping. Cheaper models report the same headers. |
+| `source` | `token` or `statusline`. See [Sources](#sources). |
+| `model` | Which model to ping. Cheaper models report the same headers. Ignored by `statusline`. |
 | `threshold_minutes` | How long `clusage usage` reuses a cached reading. |
 | `fetch_cron` | Schedule for the automatic fetch. Empty disables it. |
 | `history_hours` | How far back the history graphs may read. |

@@ -17,6 +17,9 @@ import (
 const keychainService = "clusage"
 
 type Config struct {
+	// Source is where readings come from: "token" probes the API with a stored
+	// token, "statusline" reads what "clusage statusline" stored. Empty is token.
+	Source           string `json:"source"`
 	Model            string `json:"model"`
 	ThresholdMinutes int    `json:"threshold_minutes"`
 	// FetchCron is one or more 5-field cron expressions separated by ";".
@@ -53,6 +56,7 @@ type Guard struct {
 }
 
 var defaultConfig = Config{
+	Source:           "token",
 	Model:            "claude-haiku-4-5",
 	ThresholdMinutes: 5,
 	FetchCron:        "*/15 * * * *",
