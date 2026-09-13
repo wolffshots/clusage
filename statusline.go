@@ -84,7 +84,7 @@ func statusline() error {
 	// Run by hand, stdin is the terminal and ReadAll would wait for an EOF
 	// nobody sends. Say what the command is for instead.
 	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-		return fmt.Errorf(`statusline reads the JSON Claude Code sends on stdin: set "statusLine" in ~/.claude/settings.json to {"type": "command", "command": "clusage statusline"}, see the README`)
+		return fmt.Errorf(`statusline reads the JSON Claude Code sends on stdin: set "statusLine" in ~/.claude/settings.json to {"type": "command", "command": "clusage statusline"}. Run clusage help statusline for the full setup`)
 	}
 	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {

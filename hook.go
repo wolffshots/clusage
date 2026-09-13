@@ -108,7 +108,7 @@ func hook(args []string) error {
 	switch action {
 	case "install", "uninstall", "status":
 	default:
-		return fmt.Errorf("unknown hook action %q (want: install, uninstall, status)", action)
+		return fmt.Errorf("unknown hook action %q (want: install, uninstall, status). Run clusage help hook for details", action)
 	}
 
 	script, err := hookScript()

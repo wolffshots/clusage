@@ -25,10 +25,10 @@ var sources = []string{"statusline", "usage", "probe", "auto"}
 // There is no default, so nobody ends up on a source they did not pick.
 func errNoSource(path, got string) error {
 	if got == "" {
-		return fmt.Errorf(`no source set: set "source" in %s to one of: %s (statusline is recommended, see the README)`,
+		return fmt.Errorf(`no source set: set "source" in %s to one of: %s (statusline is recommended). Run clusage help to compare them`,
 			path, strings.Join(sources, ", "))
 	}
-	return fmt.Errorf(`unknown source %q in %s: want one of: %s`, got, path, strings.Join(sources, ", "))
+	return fmt.Errorf(`unknown source %q in %s: want one of: %s. Run clusage help to compare them`, got, path, strings.Join(sources, ", "))
 }
 
 // readUsage gets one reading from the configured source. auto tries the usage

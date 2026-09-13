@@ -15,8 +15,8 @@ token and makes no API call.
 | `source` | Where the numbers come from | Needs |
 |---|---|---|
 | `statusline` (recommended) | The `rate_limits` field Claude Code hands its status line command | Claude Code v2.1.80 or later, a Pro or Max plan |
-| `usage` | The account usage endpoint that Claude Code's `/usage` panel reads | A token from `claude setup-token` |
-| `probe` | A probe call to the API, see [How the probe works](#how-the-probe-works) | A token from `claude setup-token` |
+| `usage` | The account usage endpoint that Claude Code's `/usage` panel reads | A Claude Code login or a token, see [Token](#token) |
+| `probe` | A probe call to the API, see [How the probe works](#how-the-probe-works) | A Claude Code login or a token, see [Token](#token) |
 | `auto` | `usage`, then `statusline`, then `probe`, the first that answers | Whatever the step it lands on needs |
 
 There is no default. Until `source` is set, a reading fails with an error that
@@ -186,6 +186,7 @@ hours without a `claude` run. Run `claude` once to refresh it.
 clusage             # open the TUI
 clusage tui         # the same thing, named explicitly
 clusage usage       # print one line per window and exit
+clusage help        # overview; clusage help <command> for one command
 clusage --version   # print the version and exit
 ```
 

@@ -221,7 +221,7 @@ func loadToken() (string, error) {
 	}
 	t, err := claudeCodeToken()
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", errors.New("no token found: log in with claude, set CLAUDE_CODE_OAUTH_TOKEN, or run clusage setup on macOS")
+		return "", errors.New("no token found: log in with claude, set CLAUDE_CODE_OAUTH_TOKEN, or run clusage setup on macOS. Run clusage help setup for details")
 	}
 	return t, err
 }

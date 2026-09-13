@@ -333,6 +333,36 @@ func TestVersionFlag(t *testing.T) {
 	}
 }
 
+// Every way of asking for help prints text and never reaches the command, so
+// usage -h works with no source set and --help does not open the TUI.
+func TestHelp(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cases := map[string]string{
+		"--help": "Getting started", "-h": "Commands:", "help": "Commands:",
+		"help usage": "-force", "usage -h": "-threshold", "usage --help": "-force",
+		"statusline -h": "statusLine", "hook status --help": "uninstall", "help setup": "CLAUDE_CODE_OAUTH_TOKEN",
+	}
+	for args, want := range cases {
+		out := captureStdout(t, func() {
+			if err := run(strings.Fields(args)); err != nil {
+				t.Errorf("run(%q) = %v", args, err)
+			}
+		})
+		if !strings.Contains(out, want) {
+			t.Errorf("run(%q) printed no %q:\n%s", args, want, out)
+		}
+	}
+	if err := run([]string{"help", "nope"}); err == nil {
+		t.Error("help for an unknown command returned no error")
+	}
+	// Each command the dispatch accepts has its own help.
+	for _, cmd := range []string{"tui", "usage", "statusline", "setup", "hook", "guard-config", "help"} {
+		if _, ok := commandHelp[cmd]; !ok {
+			t.Errorf("no help for %q", cmd)
+		}
+	}
+}
+
 func TestUnknownCommandIsReported(t *testing.T) {
 	// The formula also asserts on this message, so it must name every command.
 	err := run([]string{"nope"})

@@ -33,11 +33,24 @@ func run(args []string) error {
 		fmt.Println("clusage", version)
 		return nil
 	}
+	if len(args) > 0 && isHelpFlag(args[0]) {
+		return printHelp("")
+	}
 	cmd := "tui"
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		cmd, args = args[0], args[1:]
 	}
+	// Checked before the command runs: usage fails on an unset source before
+	// it parses flags, and the TUI would open the alt screen.
+	if _, ok := commandHelp[cmd]; ok && slices.ContainsFunc(args, isHelpFlag) {
+		return printHelp(cmd)
+	}
 	switch cmd {
+	case "help":
+		if len(args) > 0 {
+			return printHelp(args[0])
+		}
+		return printHelp("")
 	case "setup":
 		return setup()
 	case "usage":
@@ -51,7 +64,7 @@ func run(args []string) error {
 	case "tui":
 		return runTUI()
 	default:
-		return fmt.Errorf("unknown command %q (want: tui, setup, usage, statusline, hook, guard-config)", cmd)
+		return fmt.Errorf("unknown command %q (want: %s). Run clusage help for details", cmd, strings.Join(commandNames(), ", "))
 	}
 }
 
