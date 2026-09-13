@@ -624,9 +624,9 @@ func sourceLabel(s string) string {
 
 func tokenLabel(has bool) string {
 	if has {
-		return positiveStyle.Render("in the login keychain")
+		return positiveStyle.Render("found")
 	}
-	return warnStyle.Render("not stored  (clusage setup)")
+	return warnStyle.Render("not found  (see the README)")
 }
 
 // ---- small helpers ---------------------------------------------------------

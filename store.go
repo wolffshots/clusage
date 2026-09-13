@@ -3,7 +3,9 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -196,16 +198,78 @@ func saveToken(token string) error {
 	return nil
 }
 
+// claudeCodeKeychainService is where Claude Code keeps its login on macOS.
+const claudeCodeKeychainService = "Claude Code-credentials"
+
+// loadToken tries the environment, then the clusage keychain entry, then the
+// Claude Code login: the keychain on macOS, a file on Linux and Windows. The
+// security command does not exist off macOS, so both keychain reads fail fast
+// there.
 func loadToken() (string, error) {
 	if t := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); t != "" {
 		return t, nil
 	}
 	out, err := exec.Command("security", "find-generic-password",
 		"-s", keychainService, "-w").Output()
-	if err != nil {
-		return "", fmt.Errorf("no token stored, run: clusage setup")
+	if t := strings.TrimSpace(string(out)); err == nil && t != "" {
+		return t, nil
 	}
-	return strings.TrimSpace(string(out)), nil
+	out, err = exec.Command("security", "find-generic-password",
+		"-s", claudeCodeKeychainService, "-w").Output()
+	if err == nil {
+		return claudeCodeLogin(out, "the "+claudeCodeKeychainService+" keychain entry")
+	}
+	t, err := claudeCodeToken()
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", errors.New("no token found: log in with claude, set CLAUDE_CODE_OAUTH_TOKEN, or run clusage setup on macOS")
+	}
+	return t, err
+}
+
+// claudeCodeToken reads the access token from the .credentials.json file that
+// a Claude Code login writes on Linux and Windows.
+func claudeCodeToken() (string, error) {
+	dir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		dir = filepath.Join(home, ".claude")
+	}
+	path := filepath.Join(dir, ".credentials.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return claudeCodeLogin(raw, path)
+}
+
+// claudeCodeLogin takes the access token out of a Claude Code login, which is
+// the same JSON in the macOS keychain and in the credentials file. where names
+// its origin in errors.
+//
+// Clusage never refreshes the token. A refresh rotates the refresh token, and
+// Claude Code would lose its login. An expired token asks for a claude run,
+// which refreshes it.
+func claudeCodeLogin(raw []byte, where string) (string, error) {
+	var c struct {
+		OAuth struct {
+			AccessToken string `json:"accessToken"`
+			ExpiresAt   int64  `json:"expiresAt"` // unix milliseconds
+		} `json:"claudeAiOauth"`
+	}
+	// The decode error names no content, so the token cannot leak through it.
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return "", fmt.Errorf("parse %s: %w", where, err)
+	}
+	switch {
+	case c.OAuth.AccessToken == "":
+		return "", fmt.Errorf("no Claude Code login in %s", where)
+	case c.OAuth.ExpiresAt > 0 && time.Now().UnixMilli() >= c.OAuth.ExpiresAt:
+		return "", errors.New("the Claude Code login has expired: run claude once to refresh it")
+	}
+	return c.OAuth.AccessToken, nil
 }
 
 type Reading struct {
@@ -222,7 +286,13 @@ func openDB() (*sql.DB, error) {
 	// The driver only sets these when the DSN asks. Without them the database
 	// opens with journal_mode=delete and busy_timeout=0, so the guard rail hook
 	// and the TUI fail each other's writes instantly with SQLITE_BUSY.
-	dsn := "file:" + (&url.URL{Path: filepath.Join(dir, "clusage.db")}).String() +
+	// A URI path uses forward slashes and starts with one, so a Windows path
+	// becomes /C:/Users/..., which SQLite reads as the drive.
+	p := filepath.ToSlash(filepath.Join(dir, "clusage.db"))
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	dsn := "file:" + (&url.URL{Path: p}).String() +
 		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {

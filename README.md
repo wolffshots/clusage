@@ -115,10 +115,9 @@ release binary if you want `--version` to name the release.
 
 ### Platform support
 
-The keychain path is macOS only. `clusage setup` shells out to the `security`
-command, which does not exist on Linux or Windows. Set
-`CLAUDE_CODE_OAUTH_TOKEN` in the environment to skip the keychain on those
-platforms. Everything else works on all three.
+All sources work on macOS, Linux and Windows. Only `clusage setup` is macOS only,
+because it shells out to the `security` command. Every platform can read the
+Claude Code login instead, see [Token](#token).
 
 ## Setup
 
@@ -161,8 +160,20 @@ clusage setup
 ```
 
 The token goes into the login keychain under the service name `clusage`. The
-prompt hides what you type. `CLAUDE_CODE_OAUTH_TOKEN` takes priority over the
-keychain when it is set.
+prompt hides what you type.
+
+Clusage looks for a token in this order:
+
+1. `CLAUDE_CODE_OAUTH_TOKEN` in the environment.
+2. The `clusage` keychain entry, on macOS.
+3. The Claude Code login. macOS keeps it in the keychain entry
+   `Claude Code-credentials`, and macOS asks once to allow clusage to read it.
+   Linux and Windows keep it in `~/.claude/.credentials.json`, or in
+   `$CLAUDE_CONFIG_DIR` when that is set. After `claude` has logged in, no
+   other setup is needed.
+
+Clusage does not refresh the Claude Code login. A login expires after some
+hours without a `claude` run. Run `claude` once to refresh it.
 
 ## Run
 

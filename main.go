@@ -191,7 +191,8 @@ func report(r Reading, hist []Reading, now time.Time, cached bool, verbose bool)
 		// guard rail hook reads $1, $2 and $4 and then searches for "resets",
 		// so a field added here moves nothing it depends on.
 		line := fmt.Sprintf("%-9s%-11s%-18s%-10s%s",
-			w.Name, percentUsed(w.Utilization), w.Status, rateLabel(rate, ok),
+			// The trailing space keeps a long name such as 7d-sonnet off its percent.
+			w.Name+" ", percentUsed(w.Utilization), w.Status, rateLabel(rate, ok),
 			formatReset(w.Reset, now))
 		fmt.Println(strings.TrimRight(line, " "))
 	}

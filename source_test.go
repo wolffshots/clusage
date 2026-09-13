@@ -3,12 +3,54 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestClaudeCodeToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	write := func(body string) {
+		if err := os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	later := time.Now().Add(time.Hour).UnixMilli()
+	earlier := time.Now().Add(-time.Hour).UnixMilli()
+
+	if _, err := claudeCodeToken(); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing file: err = %v, want ErrNotExist", err)
+	}
+	write(fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"fake-access","refreshToken":"fake-refresh","expiresAt":%d}}`, later))
+	if tok, err := claudeCodeToken(); err != nil || tok != "fake-access" {
+		t.Fatalf("valid login: got %q, %v", tok, err)
+	}
+	write(fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"fake-access","expiresAt":%d}}`, earlier))
+	if _, err := claudeCodeToken(); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expired login: err = %v", err)
+	}
+	write(`{}`)
+	if _, err := claudeCodeToken(); err == nil {
+		t.Fatal("no login: want an error")
+	}
+	write(`{"claudeAiOauth":`)
+	if _, err := claudeCodeToken(); err == nil || strings.Contains(err.Error(), "fake") {
+		t.Fatalf("bad JSON: err = %v", err)
+	}
+	// The macOS keychain hands back the same JSON with a trailing newline.
+	kc := fmt.Sprintf("{\"claudeAiOauth\":{\"accessToken\":\"fake-kc\",\"expiresAt\":%d}}\n", later)
+	if tok, err := claudeCodeLogin([]byte(kc), "keychain"); err != nil || tok != "fake-kc" {
+		t.Fatalf("keychain login: got %q, %v", tok, err)
+	}
+}
 
 func windowsByName(h map[string]string) map[string]window {
 	out := map[string]window{}
