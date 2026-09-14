@@ -170,7 +170,7 @@ func (m model) nowView(height int) string {
 	}
 
 	age := now.Sub(m.latest.FetchedAt).Round(time.Second)
-	b.WriteString(dimStyle.Render("  read " + age.String() + " ago  ·  " + m.latest.Model))
+	b.WriteString(dimStyle.Render("  read " + age.String() + " ago  ·  " + readingSource(m.latest)))
 	return clip(b.String(), height)
 }
 
@@ -514,38 +514,47 @@ func (m model) configView() string {
 	var b strings.Builder
 	b.WriteString(frame(titleStyle.Render("runtime"), rows(
 		[2]string{"source", sourceLabel(m.cfg.Source)},
+		[2]string{"fallback", fallbackLabel(m.cfg)},
+		[2]string{"errors (24h)", errorsLabel(m.errCounts)},
 		[2]string{"model", val(m.cfg.Model)},
 		[2]string{"threshold", val(itoa(m.cfg.ThresholdMinutes) + "m")},
 		[2]string{"history window", val(itoa(m.cfg.HistoryHours) + "h")},
 	), frameW) + "\n")
 
-	var schedule string
-	if !cronValid(m.cfg.FetchCron) {
-		label := m.cfg.FetchCron
-		if strings.TrimSpace(label) == "" {
-			label = "(unset)"
+	// sched lays out one schedule and when it next fires. An empty probe_cron
+	// is simply off. A schedule that does not parse is flagged, because it
+	// never fires.
+	sched := func(name, value string) [2]string {
+		switch {
+		case name == "probe_cron" && strings.TrimSpace(value) == "":
+			return [2]string{name, dimStyle.Render("(unset)")}
+		case !cronValid(value):
+			label := value
+			if strings.TrimSpace(label) == "" {
+				label = "(unset)"
+			}
+			return [2]string{name, errorStyle.Render(label) +
+				dimStyle.Render("  needs 5 fields per expression, ; separates several")}
 		}
-		schedule = rows(
-			[2]string{"fetch_cron", errorStyle.Render(label) +
-				dimStyle.Render("  needs 5 fields per expression, ; separates several")},
-			[2]string{"auto-fetch", dimStyle.Render("disabled")},
-		)
-	} else {
-		state := positiveStyle.Render("on")
-		if !m.autoFetch {
-			state = warnStyle.Render("paused (a resumes)")
-		}
-		next := dimStyle.Render("never")
-		if t, ok := nextFetch(m.cfg, time.Now()); ok {
-			next = val(t.Local().Format("Mon 15:04")) +
+		when := dimStyle.Render("   never fires")
+		if t, ok := nextFetch(value, time.Now()); ok {
+			when = dimStyle.Render("   next ") + val(t.Local().Format("Mon 15:04")) +
 				dimStyle.Render("  ("+untilLabel(t, time.Now())+")")
 		}
-		schedule = rows(
-			[2]string{"fetch_cron", val(m.cfg.FetchCron)},
-			[2]string{"auto-fetch", state},
-			[2]string{"next fetch", next},
-		)
+		return [2]string{name, val(value) + when}
 	}
+	state := positiveStyle.Render("on")
+	switch {
+	case !m.keys.Auto.Enabled():
+		state = dimStyle.Render("disabled")
+	case !m.autoFetch:
+		state = warnStyle.Render("paused (a resumes)")
+	}
+	schedule := rows(
+		sched("fetch_cron", m.cfg.FetchCron),
+		sched("probe_cron", m.cfg.ProbeCron),
+		[2]string{"auto-fetch", state},
+	)
 	b.WriteString(frame(titleStyle.Render("schedule"), schedule, frameW) + "\n")
 
 	// The guard rail runs as a shell hook, and a CLUSAGE_GUARD_* variable
@@ -573,9 +582,7 @@ func (m model) configView() string {
 		[2]string{"version", val(version)},
 	), frameW) + "\n")
 
-	b.WriteString(dimStyle.Render("  Edit the file and restart to change these. Cron fields: minute hour") + "\n")
-	b.WriteString(dimStyle.Render("  day-of-month month day-of-week, e.g. \"*/15 * * * *\" every 15 minutes,") + "\n")
-	b.WriteString(dimStyle.Render("  \"0 9-17 * * 1-5\" weekday work hours, \"5 9 * * *;35 18 * * *\" twice a day."))
+	b.WriteString(dimStyle.Render("  Edit the file and restart to apply. Cron: minute hour day-of-month month day-of-week."))
 	return b.String()
 }
 
@@ -620,6 +627,46 @@ func sourceLabel(s string) string {
 		return warnStyle.Render("not set  (" + strings.Join(sources, ", ") + ")")
 	}
 	return valueStyle.Render(s)
+}
+
+// fallbackLabel reports the fallback source, or why none applies.
+func fallbackLabel(c Config) string {
+	switch {
+	case c.Source == "auto":
+		return dimStyle.Render("(auto runs its own chain)")
+	case c.Fallback == "":
+		return dimStyle.Render("none")
+	case c.Fallback == "auto" || !slices.Contains(sources, c.Fallback):
+		return warnStyle.Render(c.Fallback + "  (want statusline, usage or probe)")
+	}
+	return valueStyle.Render(c.Fallback)
+}
+
+// errorTotal is the number of failed reads across every source and status.
+func errorTotal(counts []errorCount) int {
+	n := 0
+	for _, c := range counts {
+		n += c.N
+	}
+	return n
+}
+
+// errorsLabel breaks the failed reads down as "usage 429×7  probe 401×1". A
+// failure with no HTTP status, such as a timeout or a missing token, reads as
+// "error".
+func errorsLabel(counts []errorCount) string {
+	if len(counts) == 0 {
+		return positiveStyle.Render("none")
+	}
+	var parts []string
+	for _, c := range counts {
+		status := "error"
+		if c.Status != 0 {
+			status = itoa(c.Status)
+		}
+		parts = append(parts, c.Source+" "+status+"×"+itoa(c.N))
+	}
+	return warnStyle.Render(strings.Join(parts, "  "))
 }
 
 func tokenLabel(has bool) string {

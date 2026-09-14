@@ -374,12 +374,22 @@ deny() {
 }
 
 # read_usage <cache-minutes>. A short cache means each poll reads a new probe.
+# stderr joins the table, so a failure brings its reason along. An error line
+# never starts with a window name, so the table readers skip it.
 read_usage() {
   if [[ -n "${CLUSAGE_GUARD_FIXTURE:-}" ]]; then
     cat "$CLUSAGE_GUARD_FIXTURE"
   else
-    clusage usage -threshold "$1" 2>/dev/null
+    clusage usage -threshold "$1" 2>&1
   fi
+}
+
+# reason <table>. The error clusage printed, joined onto one line. clusage
+# starts an error with "clusage: ", and every line after that belongs to it.
+# The cut keeps a long API body out of the deny, and the cause comes first.
+reason() {
+  awk 'f || /^clusage: /{ f = 1; gsub(/[\t\r]/, " "); printf "%s%s", (n++ ? " " : ""), $0 }' <<<"$1" |
+    cut -c1-600
 }
 
 # win <table> <window prefix>. "<percent>|<status>|<rate>|<reset>" for the
@@ -434,8 +444,9 @@ field() {
 # The verdict, the window it names and that window's own fields come first. The
 # two raw percents and the two raw rates follow, because the caller sizes its
 # next wait from all four, whichever window tripped. The reset text holds
-# spaces, so it stays last for the reader to absorb. Nothing is printed when
-# clusage produced no usable window, which reports the NODATA verdict.
+# spaces, so it stays last for the reader to absorb. When clusage produced no
+# usable window, the verdict is NODATA and the last field holds the error
+# clusage printed, if any.
 check() {
   local table five seven verdict=OK name=5h w pct status reset
   table=$(read_usage "$1")
@@ -445,7 +456,7 @@ check() {
   five=$(win "$table" "5h")
   seven=$(win "$table" "7d")
   if [[ "${five%%|*}" == -1 || "${seven%%|*}" == -1 ]]; then
-    printf 'NODATA||||||||\n'
+    printf 'NODATA||||||||%s\n' "$(reason "$table")"
     return 0
   fi
   if [[ "$ALLOW_OVERAGE" != 1 ]]; then
@@ -509,9 +520,17 @@ stop() {
 # broken, not that there is headroom, so the guard denies rather than guess.
 # The message names the off switch, because a denied agent cannot repair
 # clusage on its own and the choice belongs to the user.
+#
+# nodata <reason>. The reason is the error clusage printed. It goes into the
+# deny word for word, because it names the fix, such as a login to renew.
 nodata() {
-  echo "clusage guard rail: no usable rate limit window, usage is unknown, call denied." >&2
-  deny "clusage guard rail: clusage reported no usable rate limit window, so the guard cannot tell how much budget is left, and it denies instead of assuming there is room. Stop all work now, in this agent and in every subagent. Do not retry, because the next call is denied too. Tell the user that clusage is not reporting, and give them both of these commands: clusage usage -force to see the underlying error, and touch $OFF to stand the guard down until rm $OFF puts it back. Then end the turn and wait for the user."
+  local said="" relay="Tell the user that clusage is not reporting"
+  if [[ -n "$1" ]]; then
+    said=" The error from clusage: ${1#clusage: }"
+    relay="Tell the user that clusage is not reporting, and pass on the error from clusage and the fix it names"
+  fi
+  echo "clusage guard rail: no usable rate limit window, usage is unknown, call denied.$said" >&2
+  deny "clusage guard rail: clusage reported no usable rate limit window, so the guard cannot tell how much budget is left, and it denies instead of assuming there is room.$said Stop all work now, in this agent and in every subagent. Do not retry, because the next call is denied too. $relay. Give them both of these commands: clusage usage -force to see the underlying error, and touch $OFF to stand the guard down until rm $OFF puts it back. Then end the turn and wait for the user."
 }
 
 # tool_name <payload>. The tool name from the PreToolUse event, so a scheduling
@@ -567,7 +586,7 @@ done
 IFS='|' read -r verdict name value status pfive pseven rate5 rate7 reset <<<"$(check $((interval / 60)))"
 
 if [[ "$verdict" == "NODATA" ]]; then
-  nodata
+  nodata "$reset"
 fi
 
 if [[ "$verdict" == "SPENT" ]]; then
@@ -585,7 +604,7 @@ if [[ "$verdict" == "SOFT" ]]; then
     waited=$(( waited + POLL ))
     IFS='|' read -r verdict name value status pfive pseven rate5 rate7 reset <<<"$(check 0)"
     if [[ "$verdict" == "NODATA" ]]; then
-      nodata
+      nodata "$reset"
     fi
     if [[ "$verdict" == "SPENT" ]]; then
       stop "$name" "$status"

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
 )
 
 func TestClaudeCodeToken(t *testing.T) {
@@ -127,18 +129,7 @@ func TestReadUsageFallsBackToTheProbe(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("ANTHROPIC_BASE_URL", srv.URL)
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
-	// An in-memory database rather than openDB, whose file DSN does not open
-	// on Windows. Only the readings table is needed.
-	db, err := sql.Open("sqlite", "file::memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	db.SetMaxOpenConns(1) // every connection to :memory: is a separate database
-	if _, err := db.Exec(`CREATE TABLE readings (id INTEGER PRIMARY KEY AUTOINCREMENT,
-		fetched_at TEXT NOT NULL, model TEXT NOT NULL, headers TEXT NOT NULL)`); err != nil {
-		t.Fatal(err)
-	}
+	db := memDB(t)
 
 	// No source set is an error that names every choice, and calls nothing.
 	for _, src := range []string{"", "token"} {
@@ -181,6 +172,187 @@ func TestReadUsageFallsBackToTheProbe(t *testing.T) {
 	cfg.Source = "probe"
 	if _, _, fresh, err = readUsage(context.Background(), db, cfg, "/c.json", "m"); err != nil || !fresh || probed != 3 {
 		t.Fatalf("probe source: err=%v fresh=%v probed=%d", err, fresh, probed)
+	}
+}
+
+// memDB is an in-memory database rather than openDB, whose file DSN does not
+// open on Windows.
+func memDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file::memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	db.SetMaxOpenConns(1) // every connection to :memory: is a separate database
+	if err := migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+// fakeAPI answers the usage endpoint with usageStatus and the probe with
+// probeStatus, where 200 carries windows. It counts the calls to each.
+func fakeAPI(t *testing.T, usageStatus, probeStatus int, usageCalls, probeCalls *int) {
+	t.Helper()
+	errBody := `{"type":"error","error":{"type":"error","message":"no"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/api/oauth/usage") {
+			*usageCalls++
+			if usageStatus != http.StatusOK {
+				w.Header().Set("retry-after", "120")
+				w.WriteHeader(usageStatus)
+				w.Write([]byte(errBody))
+				return
+			}
+			w.Write([]byte(`{"five_hour":{"utilization":10},"seven_day":{"utilization":20}}`))
+			return
+		}
+		*probeCalls++
+		if probeStatus != http.StatusOK {
+			w.WriteHeader(probeStatus)
+			w.Write([]byte(errBody))
+			return
+		}
+		w.Header().Set("anthropic-ratelimit-unified-5h-utilization", "0.42")
+		w.Header().Set("anthropic-ratelimit-unified-7d-utilization", "0.1")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"m","type":"message","role":"assistant","content":[],"model":"x",
+			"stop_reason":"max_tokens","usage":{"input_tokens":23,"output_tokens":0}}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("ANTHROPIC_BASE_URL", srv.URL)
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+}
+
+// A usage source with a probe fallback probes on a 429, records the 429, and
+// waits out its retry-after before it calls the usage endpoint again.
+func TestReadUsageFallbackOn429(t *testing.T) {
+	var usageCalls, probeCalls int
+	fakeAPI(t, http.StatusTooManyRequests, http.StatusOK, &usageCalls, &probeCalls)
+	db := memDB(t)
+	cfg := Config{Source: "usage", Fallback: "probe", ThresholdMinutes: 5}
+
+	r, _, fresh, err := readUsage(context.Background(), db, cfg, "/c.json", "m")
+	if err != nil || !fresh || r.Model != "m" || usageCalls != 1 || probeCalls != 1 {
+		t.Fatalf("err=%v fresh=%v model=%q usage=%d probe=%d", err, fresh, r.Model, usageCalls, probeCalls)
+	}
+	if got := readingSource(r); got != "probe m, fallback" {
+		t.Fatalf("readingSource = %q", got)
+	}
+	counts, err := fetchErrorCounts(db, time.Now().Add(-time.Hour))
+	if err != nil || len(counts) != 1 || counts[0] != (errorCount{"usage", 429, 1}) {
+		t.Fatalf("counts = %+v, %v", counts, err)
+	}
+	if until, ok := backoffUntil(db, "usage"); !ok || time.Until(until) < 100*time.Second {
+		t.Fatalf("backoff until %v (ok=%v), want about 120s ahead", until, ok)
+	}
+
+	// Inside the wait the endpoint is not called, and the skip is no new error.
+	if _, _, _, err := readUsage(context.Background(), db, cfg, "/c.json", "m"); err != nil || usageCalls != 1 || probeCalls != 2 {
+		t.Fatalf("err=%v usage=%d probe=%d", err, usageCalls, probeCalls)
+	}
+	if counts, _ := fetchErrorCounts(db, time.Now().Add(-time.Hour)); errorTotal(counts) != 1 {
+		t.Fatalf("the skip was counted: %+v", counts)
+	}
+
+	// With no fallback the skip is the error.
+	cfg.Fallback = ""
+	if _, _, _, err := readUsage(context.Background(), db, cfg, "/c.json", "m"); err == nil || !strings.Contains(err.Error(), "waiting out a 429") {
+		t.Fatalf("err = %v", err)
+	}
+
+	cfg.Fallback = "auto"
+	if _, _, _, err := readUsage(context.Background(), db, cfg, "/c.json", "m"); err == nil || !strings.Contains(err.Error(), "unknown fallback") {
+		t.Fatalf("auto fallback: err = %v", err)
+	}
+}
+
+// A chain that ends on a 401 leads its error with the cause and the fix,
+// because the guard rail hook shows that first line to the agent.
+func TestReadUsageUnauthorized(t *testing.T) {
+	var usageCalls, probeCalls int
+	fakeAPI(t, http.StatusUnauthorized, http.StatusUnauthorized, &usageCalls, &probeCalls)
+	db := memDB(t)
+	cfg := Config{Source: "usage", Fallback: "probe"}
+	_, _, _, err := readUsage(context.Background(), db, cfg, "/c.json", "m")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	first, _, _ := strings.Cut(err.Error(), "\n")
+	if !strings.HasPrefix(first, "the API rejected the OAuth token (401") || !strings.Contains(first, "Run claude") {
+		t.Fatalf("first line = %q", first)
+	}
+	if !strings.Contains(err.Error(), "usage: ") || !strings.Contains(err.Error(), "probe: ") {
+		t.Fatalf("the detail lost a step: %v", err)
+	}
+	if counts, _ := fetchErrorCounts(db, time.Now().Add(-time.Hour)); errorTotal(counts) != 2 {
+		t.Fatalf("counts = %+v", counts)
+	}
+}
+
+// A status line row newer than a usage reading must not stand in for it,
+// because it lacks the Opus and overage windows the guard rail checks.
+func TestCachedReadingMatchesTheSource(t *testing.T) {
+	db := memDB(t)
+	if err := saveReading(db, Reading{FetchedAt: time.Now().Add(-time.Minute), Model: usageAPIModel,
+		Headers: map[string]string{"anthropic-ratelimit-unified-7d-opus-utilization": "1"}}); err != nil {
+		t.Fatal(err)
+	}
+	saveStatusline(t, db, time.Now())
+
+	cfg := Config{Source: "usage"}
+	if r, ok, err := latestReadingFrom(db, cfg.readingModels("m")...); err != nil || !ok || r.Model != usageAPIModel {
+		t.Fatalf("usage: got %q ok=%v err=%v", r.Model, ok, err)
+	}
+	cfg.Source = "auto"
+	if r, _, _ := latestReadingFrom(db, cfg.readingModels("m")...); r.Model != statuslineModel {
+		t.Fatalf("auto: got %q, want the newest of any source", r.Model)
+	}
+	// The status line command reads its previous row through latestReading.
+	// Losing it breaks the carry-forward of a window Claude Code dropped.
+	if r, ok, err := latestReading(db); err != nil || !ok || r.Model != statuslineModel {
+		t.Fatalf("latestReading: got %q ok=%v err=%v", r.Model, ok, err)
+	}
+	cfg = Config{Source: "probe", Fallback: "statusline"}
+	if got := cfg.readingModels("m"); len(got) != 2 || got[0] != "m" || got[1] != statuslineModel {
+		t.Fatalf("probe with a statusline fallback: %v", got)
+	}
+}
+
+// Without a retry-after header the wait doubles with each 429 of the last hour
+// and stops at maxBackoff. A header wins. Rows past errorKeep are deleted.
+func TestBackoffGrowsAndOldErrorsGo(t *testing.T) {
+	db := memDB(t)
+	now := time.Now()
+	tooMany := func() error {
+		return &anthropic.Error{StatusCode: http.StatusTooManyRequests,
+			Request:  httptest.NewRequest(http.MethodGet, "/api/oauth/usage", nil),
+			Response: &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}}}
+	}
+	for i, want := range []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, maxBackoff, maxBackoff} {
+		if err := saveFetchError(db, "usage", tooMany(), now); err != nil {
+			t.Fatal(err)
+		}
+		if until, ok := backoffUntil(db, "usage"); !ok || until.Sub(now) != want {
+			t.Fatalf("429 number %d: wait %v, want %v", i+1, until.Sub(now), want)
+		}
+	}
+	withHeader := tooMany().(*anthropic.Error)
+	withHeader.Response.Header.Set("retry-after", "30")
+	if err := saveFetchError(db, "usage", withHeader, now); err != nil {
+		t.Fatal(err)
+	}
+	if until, _ := backoffUntil(db, "usage"); until.Sub(now) != 30*time.Second {
+		t.Fatalf("retry-after: wait %v, want 30s", until.Sub(now))
+	}
+
+	// A write a week later deletes every row above.
+	if err := saveFetchError(db, "probe", errors.New("timeout"), now.Add(errorKeep+time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if counts, _ := fetchErrorCounts(db, time.Time{}); errorTotal(counts) != 1 {
+		t.Fatalf("old rows kept: %+v", counts)
 	}
 }
 

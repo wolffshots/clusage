@@ -53,17 +53,17 @@ func TestCronMatches(t *testing.T) {
 func TestFetchDueMultipleExpressions(t *testing.T) {
 	cfg := Config{FetchCron: "5 9 * * *;35 18 * * *"}
 	for _, when := range []string{"2026-08-24 09:05", "2026-08-24 18:35"} {
-		if !cfg.fetchDue(at(when)) {
-			t.Errorf("fetchDue(%s) = false, want true", when)
+		if !cronDue(cfg.FetchCron, at(when)) {
+			t.Errorf("cronDue(%s) = false, want true", when)
 		}
 	}
 	for _, when := range []string{"2026-08-24 09:35", "2026-08-24 18:05", "2026-08-24 12:00"} {
-		if cfg.fetchDue(at(when)) {
-			t.Errorf("fetchDue(%s) = true, want false", when)
+		if cronDue(cfg.FetchCron, at(when)) {
+			t.Errorf("cronDue(%s) = true, want false", when)
 		}
 	}
 	// An empty schedule must never fire, so auto-fetch stays off by default.
-	if (Config{}).fetchDue(at("2026-08-24 09:05")) {
+	if cronDue("", at("2026-08-24 09:05")) {
 		t.Error("empty schedule fired")
 	}
 }
@@ -82,17 +82,17 @@ func TestCronValid(t *testing.T) {
 }
 
 func TestNextFetch(t *testing.T) {
-	got, ok := nextFetch(Config{FetchCron: "*/15 * * * *"}, at("2026-08-24 10:01"))
+	got, ok := nextFetch("*/15 * * * *", at("2026-08-24 10:01"))
 	if !ok || !got.Equal(at("2026-08-24 10:15")) {
 		t.Errorf("nextFetch = %v (ok=%v), want 10:15", got, ok)
 	}
 	// The current minute is excluded, so a fetch that just fired reports the
 	// following slot instead of the one it already handled.
-	got, ok = nextFetch(Config{FetchCron: "*/15 * * * *"}, at("2026-08-24 10:15"))
+	got, ok = nextFetch("*/15 * * * *", at("2026-08-24 10:15"))
 	if !ok || !got.Equal(at("2026-08-24 10:30")) {
 		t.Errorf("nextFetch at a matching minute = %v, want 10:30", got)
 	}
-	if _, ok := nextFetch(Config{FetchCron: ""}, at("2026-08-24 10:00")); ok {
+	if _, ok := nextFetch("", at("2026-08-24 10:00")); ok {
 		t.Error("nextFetch on an empty schedule reported a time")
 	}
 }
@@ -197,6 +197,93 @@ func TestCronTickFiresOncePerMinute(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Error("a non-matching tick ended the chain")
+	}
+}
+
+// probe_cron alone arms the tick chain, and its minute starts a fetch even
+// where fetch_cron selects nothing.
+func TestProbeCronFires(t *testing.T) {
+	m := testModel("")
+	m.cfg.ProbeCron = "0 6 * * *"
+	m = newModel(nil, m.cfg, "/tmp/c.json", Reading{FetchedAt: time.Now()}, true)
+	m.width, m.height = 96, 32
+	if !m.autoFetch || !m.keys.Auto.Enabled() {
+		t.Fatal("a valid probe_cron did not arm auto-fetch")
+	}
+	next, _ := m.Update(cronTickMsg{t: at("2026-08-24 06:00"), seq: m.cronSeq})
+	if !next.(model).fetching {
+		t.Error("the probe minute did not start a fetch")
+	}
+	next, _ = m.Update(cronTickMsg{t: at("2026-08-24 06:01"), seq: m.cronSeq})
+	if next.(model).fetching {
+		t.Error("a minute neither schedule selects started a fetch")
+	}
+	if !strings.Contains(m.renderTabs(), "probe 0 6 * * *") || !strings.Contains(m.configView(), "0 6 * * *   next ") {
+		t.Error("the probe schedule is not shown")
+	}
+}
+
+// A probe minute that lands while a fetch is in flight waits for that fetch,
+// rather than being lost, because the probe is what starts a 5h window.
+func TestProbeWaitsForAFetchInFlight(t *testing.T) {
+	m := newModel(nil, Config{Model: "m", ProbeCron: "0 6 * * *", HistoryHours: 168},
+		"/tmp/c.json", Reading{FetchedAt: time.Now()}, true)
+	m.fetching = true
+	next, _ := m.Update(cronTickMsg{t: at("2026-08-24 06:00"), seq: m.cronSeq})
+	m = next.(model)
+	if !m.probePending {
+		t.Fatal("the probe minute was dropped while a fetch was in flight")
+	}
+	next, cmd := m.Update(fetchedMsg{r: m.latest, at: time.Now()})
+	m = next.(model)
+	if m.probePending || !m.fetching || cmd == nil {
+		t.Errorf("the waiting probe did not start: pending=%v fetching=%v", m.probePending, m.fetching)
+	}
+	// It runs once. A second tick in the same minute starts nothing more.
+	m.fetching = false
+	next, _ = m.Update(cronTickMsg{t: at("2026-08-24 06:00").Add(20 * time.Second), seq: m.cronSeq})
+	if next.(model).fetching || next.(model).probePending {
+		t.Error("the probe minute fired twice")
+	}
+}
+
+// The error count reloads on its own timer, so failures from the guard rail
+// hook show up between TUI fetches, even with the schedules paused.
+func TestErrorsTickRearms(t *testing.T) {
+	m := testModel("")
+	m.autoFetch = false
+	if _, cmd := m.Update(errorsTickMsg{}); cmd == nil {
+		t.Error("the error count tick did not re-arm")
+	}
+}
+
+// Failed reads from every run show as a total on the tab bar and a breakdown
+// on the Config tab.
+func TestErrorCountsShow(t *testing.T) {
+	m := testModel("* * * * *")
+	if strings.Contains(m.renderTabs(), "errors") {
+		t.Error("the tab bar reports errors before any")
+	}
+	next, _ := m.Update(errorsMsg{counts: []errorCount{{"probe", 0, 1}, {"usage", 429, 2}}})
+	m = next.(model)
+	if !strings.Contains(m.renderTabs(), "3 errors 24h") {
+		t.Errorf("tab bar = %q", m.renderTabs())
+	}
+	if cv := m.configView(); !strings.Contains(cv, "usage 429×2") || !strings.Contains(cv, "probe error×1") {
+		t.Errorf("config view lacks the breakdown:\n%s", cv)
+	}
+}
+
+// A scheduled fetch that hands back the reading already on screen says so.
+func TestScheduledFetchMarksUnchanged(t *testing.T) {
+	m := testModel("* * * * *")
+	next, _ := m.Update(fetchedMsg{r: m.latest, auto: true, at: time.Now()})
+	if got := next.(model).lastAuto; !strings.HasSuffix(got, "✓ unchanged") {
+		t.Errorf("same reading: lastAuto = %q", got)
+	}
+	next, _ = m.Update(fetchedMsg{r: Reading{FetchedAt: time.Now().Add(time.Second)}, auto: true, at: time.Now()})
+	if got := next.(model).lastAuto; !strings.HasSuffix(got, "✓") {
+		t.Errorf("new reading: lastAuto = %q", got)
 	}
 }
 

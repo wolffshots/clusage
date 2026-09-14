@@ -33,6 +33,14 @@ const cronCheckInterval = 20 * time.Second
 // fetchTimeout bounds one API round trip.
 const fetchTimeout = 60 * time.Second
 
+// errorSpan is how far back the tab bar and the Config tab count failed reads.
+const errorSpan = 24 * time.Hour
+
+// errorsCheckInterval is how often the count reloads. Most failures come from
+// the guard rail hook, not from the TUI, so a reload after each TUI fetch alone
+// would lag by a whole fetch_cron interval.
+const errorsCheckInterval = 20 * time.Second
+
 type keyMap struct {
 	Now     key.Binding
 	History key.Binding
@@ -95,6 +103,8 @@ type fetchErrMsg struct {
 	auto bool
 }
 type historyMsg struct{ readings []Reading }
+type errorsMsg struct{ counts []errorCount }
+type errorsTickMsg struct{}
 type tokensMsg struct {
 	samples []TokenSample
 	total   tokenUse
@@ -134,6 +144,9 @@ type model struct {
 	autoFetch bool
 	lastCron  time.Time // minute of the last scheduled fetch, so one minute fires once
 	cronSeq   int       // current tick chain; older ticks are stale
+	// probePending is set when a probe_cron minute arrives while a fetch is in
+	// flight. The probe then runs as soon as that fetch lands.
+	probePending bool
 
 	latest   Reading
 	hasData  bool
@@ -149,6 +162,9 @@ type model struct {
 
 	err      error
 	lastAuto string // sticky "auto 14:15 ok" marker for the tab bar
+	// errCounts is the failed reads over errorSpan, from every run that shares
+	// the database, the guard rail hook's included.
+	errCounts []errorCount
 
 	width, height int
 }
@@ -159,7 +175,7 @@ func newModel(db *sql.DB, cfg Config, cfgPath string, latest Reading, hasData bo
 	sp.Style = lipgloss.NewStyle().Foreground(accent)
 
 	km := newKeyMap()
-	scheduled := cronValid(cfg.FetchCron)
+	scheduled := cronValid(cfg.FetchCron) || cronValid(cfg.ProbeCron)
 	if !scheduled {
 		// Nothing to toggle without a schedule; keep a to itself out of the help
 		// rather than advertise a no-op.
@@ -183,7 +199,7 @@ func newModel(db *sql.DB, cfg Config, cfgPath string, latest Reading, hasData bo
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.historyCmd(), m.tokensCmd(), m.cronTick())
+	return tea.Batch(m.historyCmd(), m.tokensCmd(), m.errorsCmd(), m.errorsTick(), m.cronTick())
 }
 
 // cronTick arms the next schedule check, or returns nil (a no-op in a Batch)
@@ -256,6 +272,45 @@ func (m model) tokensCmd() tea.Cmd {
 	}
 }
 
+// errorsCmd counts the failed reads off the UI goroutine. A failed count
+// returns no message rather than a fetchErrMsg, because that message loads the
+// count again and a broken database would loop.
+func (m model) errorsCmd() tea.Cmd {
+	db := m.db
+	return func() tea.Msg {
+		counts, err := fetchErrorCounts(db, time.Now().Add(-errorSpan))
+		if err != nil {
+			return nil
+		}
+		return errorsMsg{counts: counts}
+	}
+}
+
+// errorsTick arms the next reload of the error count. Init starts the one chain,
+// and pausing the schedules does not stop it, because the hook keeps running.
+func (m model) errorsTick() tea.Cmd {
+	return tea.Tick(errorsCheckInterval, func(time.Time) tea.Msg { return errorsTickMsg{} })
+}
+
+// probeConfig is the config a probe_cron fetch runs with: the probe source and
+// no fallback, whatever config.json says.
+func (m model) probeConfig() Config {
+	cfg := m.cfg
+	cfg.Source, cfg.Fallback = "probe", ""
+	return cfg
+}
+
+// pendingProbe starts the probe that waited for the last fetch to land, or
+// returns nil when none waits.
+func (m *model) pendingProbe() tea.Cmd {
+	if !m.probePending {
+		return nil
+	}
+	m.probePending = false
+	m.fetching = true
+	return tea.Batch(m.spin.Tick, fetchCmd(m.db, m.probeConfig(), m.cfgPath, true))
+}
+
 func (m model) historySpan() time.Duration {
 	span := historySpans[m.spanIdx].dur
 	if max := time.Duration(m.cfg.HistoryHours) * time.Hour; max > 0 && span > max {
@@ -282,11 +337,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case fetchedMsg:
 		m.fetching = false
 		m.err = nil
-		m.latest, m.hasData = msg.r, true
 		if msg.auto {
 			m.lastAuto = "auto " + msg.at.Local().Format("15:04") + " ✓"
+			// A status line source hands back the stored row until a session
+			// changes the numbers. Say so, rather than claim a new reading.
+			if m.hasData && msg.r.FetchedAt.Equal(m.latest.FetchedAt) {
+				m.lastAuto += " unchanged"
+			}
 		}
-		return m, tea.Batch(m.historyCmd(), m.tokensCmd())
+		m.latest, m.hasData = msg.r, true
+		return m, tea.Batch(m.historyCmd(), m.tokensCmd(), m.errorsCmd(), m.pendingProbe())
 
 	case fetchErrMsg:
 		m.fetching = false
@@ -294,10 +354,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Keep the last good reading on screen and flag the failure on the
 			// tab bar; a scheduled fetch failing must not hide the numbers.
 			m.lastAuto = "auto " + time.Now().Local().Format("15:04") + " ✗"
-			return m, nil
+			return m, tea.Batch(m.errorsCmd(), m.pendingProbe())
 		}
 		m.err = msg.err
-		return m, nil
+		return m, tea.Batch(m.errorsCmd(), m.pendingProbe())
 
 	case historyMsg:
 		m.history = msg.readings
@@ -305,6 +365,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selected = 0
 		}
 		return m, nil
+
+	case errorsMsg:
+		m.errCounts = msg.counts
+		return m, nil
+
+	case errorsTickMsg:
+		return m, tea.Batch(m.errorsCmd(), m.errorsTick())
 
 	case tokensMsg:
 		m.tokens, m.tokenTotal, m.tokenCalls = msg.samples, msg.total, msg.calls
@@ -315,12 +382,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // paused, or a stale tick from an old chain; let it die
 		}
 		minute := msg.t.Truncate(time.Minute)
-		if m.fetching || !m.cfg.fetchDue(msg.t) || minute.Equal(m.lastCron) {
+		probe := cronDue(m.cfg.ProbeCron, msg.t)
+		if !(probe || cronDue(m.cfg.FetchCron, msg.t)) || minute.Equal(m.lastCron) {
+			return m, m.cronTick()
+		}
+		if m.fetching {
+			// A fetch_cron minute retries on the next tick, as the reading in
+			// flight may land inside the minute. A probe starts a 5h window, so
+			// it must not be lost: it waits for the fetch in flight instead.
+			if probe {
+				m.lastCron, m.probePending = minute, true
+			}
 			return m, m.cronTick()
 		}
 		m.lastCron = minute
 		m.fetching = true
-		return m, tea.Batch(m.spin.Tick, fetchCmd(m.db, m.cfg, m.cfgPath, true), m.cronTick())
+		cfg := m.cfg
+		if probe {
+			// A probe reads every window, so a minute that both schedules select
+			// needs only the probe.
+			cfg = m.probeConfig()
+		}
+		return m, tea.Batch(m.spin.Tick, fetchCmd(m.db, cfg, m.cfgPath, true), m.cronTick())
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -460,12 +543,18 @@ func (m model) renderTabs() string {
 		}
 		bar += "  " + style.Render(m.lastAuto)
 	}
+	if n := errorTotal(m.errCounts); n > 0 {
+		bar += "  " + warnStyle.Render(itoa(n)+" errors 24h")
+	}
+	paused := ""
+	if !m.autoFetch {
+		paused = " paused"
+	}
 	if cronValid(m.cfg.FetchCron) {
-		label := m.cfg.FetchCron
-		if !m.autoFetch {
-			label += " paused"
-		}
-		bar += dimStyle.Render("  cron ") + valueStyle.Render(label)
+		bar += dimStyle.Render("  cron ") + valueStyle.Render(m.cfg.FetchCron+paused)
+	}
+	if cronValid(m.cfg.ProbeCron) {
+		bar += dimStyle.Render("  probe ") + valueStyle.Render(m.cfg.ProbeCron+paused)
 	}
 	return tabBarStyle.MaxWidth(m.width).Render(bar)
 }
@@ -489,7 +578,7 @@ func runTUI() error {
 		return err
 	}
 	defer db.Close()
-	latest, ok, err := latestReading(db)
+	latest, ok, err := latestReadingFrom(db, cfg.readingModels(cfg.Model)...)
 	if err != nil {
 		return err
 	}

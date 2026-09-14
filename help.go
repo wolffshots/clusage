@@ -33,6 +33,8 @@ Getting started:
        probe       Sends one tiny API call and reads its rate limit headers.
                    Needs a Claude Code login or a token.
        auto        Tries usage, then a recent statusline reading, then probe.
+     Set "fallback" to a second source to try when the first fails, such as
+     "source": "usage" with "fallback": "probe".
   2. For statusline, see: clusage help statusline
      For usage, probe or auto, log in with claude. See: clusage help setup
   3. Run clusage usage, or clusage for the dashboard.
@@ -59,12 +61,16 @@ Tabs:
   3 tokens   what clusage spent on its own probe calls
   4 config   the settings in use, the token and the hook status
 
-The dashboard also fetches on the "fetch_cron" schedule in config.json.
-Press a to pause or resume that.
+The dashboard also fetches on the "fetch_cron" schedule in config.json. The
+"probe_cron" schedule sends a probe call whatever the source is, which starts
+a 5h window. Press a to pause or resume both.
+
+The tab bar counts the reads that failed in the last 24 hours, from every
+clusage run. The config tab breaks the count down by source and status.
 `,
 
 	"usage": `Usage:
-  clusage usage [-force] [-verbose] [-threshold minutes] [-model name]
+  clusage usage [-force] [-verbose] [-source name] [-threshold minutes] [-model name]
 
 Prints one line per limit window: the name, the percent used, the status, the
 burn rate and when the window resets. The last line says whether the reading
@@ -77,6 +83,8 @@ Flags:
   -force              Ignore the cached reading and read the source now.
   -verbose            Also print every stored header, and the token cost of a
                       probe call.
+  -source name        The source to read. Default: "source" in config.json.
+                      "fallback" still applies.
   -threshold minutes  How old a cached reading may be. Default:
                       threshold_minutes in config.json, 5 if unset.
   -model name         The model a probe call uses. Default: "model" in
@@ -86,6 +94,7 @@ Examples:
   clusage usage
   clusage usage -force
   clusage usage -threshold 15
+  clusage usage -source probe -force   # from cron, to start a 5h window
 
 If it fails:
   "no source set"  Set "source" in config.json. See: clusage help
@@ -93,8 +102,13 @@ If it fails:
   "statusline: no reading yet"
                    Claude Code has not run clusage statusline yet. See:
                    clusage help statusline
-  usage: ... 429   The usage endpoint limits how often it answers. Wait a
-                   minute, or use source auto so another step answers.
+  usage: ... 429   The usage endpoint limits how often it answers. clusage
+                   waits before it calls it again: the retry-after time, or
+                   one minute that doubles per 429, up to 15 minutes.
+                   Set "fallback": "probe" so the probe answers meanwhile.
+  "the API rejected the OAuth token (401 Unauthorized)"
+                   Run claude to log in again. If you set a token yourself,
+                   replace it with a new one. See: clusage help setup
 `,
 
 	"statusline": `Usage:

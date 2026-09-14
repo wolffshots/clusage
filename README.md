@@ -39,6 +39,37 @@ reading costs one small inference call.
 The explicit `statusline` source takes the last reading however old. When every
 step fails, the error names why each one did.
 
+### Fallback
+
+Set `fallback` to a second source, and clusage tries it when `source` fails
+for any reason. The common pair is `"source": "usage"` with
+`"fallback": "probe"`. The usage endpoint then answers when it can, and a 429
+costs one probe call instead of a failed reading. `auto` ignores `fallback`,
+because it has its own chain.
+
+A status line reading older than `threshold_minutes` gives way to the
+fallback, the same as in `auto`. A reading under one minute old always counts,
+because clusage stores a status line row only when the numbers change.
+
+After a 429, clusage does not call the usage endpoint again until the
+`retry-after` time passes. Without that header, the wait starts at one minute
+and doubles with each 429 of the last hour, up to 15 minutes. Until the wait
+ends, clusage goes straight to the fallback.
+
+A reading that came from the fallback says so. The Now tab shows
+`read 2m ago · probe claude-haiku-4-5, fallback`, and the last line of
+`clusage usage` carries the same text.
+
+Every failed `usage` or `probe` read goes into the database, including the
+reads the guard rail hook runs. The TUI reloads the count every 20 seconds,
+so the hook's failures show up without a fetch. The tab bar shows the count
+for the last 24 hours, and the Config tab breaks it down by source and HTTP
+status. clusage deletes failures older than seven days.
+
+When the last step fails with a 401, the error starts with the cause and the
+fix: log in again with `claude`, or replace a token you set yourself. The
+guard rail hook puts that line in its deny, so the agent can pass it on.
+
 ## How the probe works
 
 The Anthropic API reports your remaining budget in `anthropic-ratelimit-*`
@@ -199,7 +230,7 @@ the API. Press `r` for a fresh reading.
 |---|---|
 | `1` `2` `3` `4` | Now, History, Tokens, Config tab |
 | `r` | Fetch a reading now |
-| `a` | Pause or resume the scheduled fetch |
+| `a` | Pause or resume both schedules |
 | `tab` | Select the next limit window |
 | `s` | Cycle the history and token span (6h, 24h, 7d, 30d) |
 | `?` | Toggle the full help |
@@ -255,8 +286,8 @@ because they come from the response `usage` block and cost nothing to keep.
 There is no cache header on the response; the body is the only place these
 counts appear.
 
-**Config** shows the effective settings, whether the schedule parses, and when
-the next scheduled fetch lands. It also reports the guard rail thresholds the
+**Config** shows the effective settings, the failed reads of the last 24 hours
+by source and status, whether each schedule parses, and when it next fires. It also reports the guard rail thresholds the
 hook would apply, and marks a row an environment variable overrode. Last come
 the config and database paths, whether a token is stored, and the version.
 
@@ -270,7 +301,12 @@ clusage usage -force      # ignore the cache and call the API
 clusage usage -verbose    # also print every header and the token cost
 clusage usage -model claude-sonnet-5
 clusage usage -threshold 15
+clusage usage -source probe -force   # read one source, fallback still applies
 ```
+
+`clusage usage` reuses a cached reading only from the configured `source` or
+its `fallback`. A status line row, which carries only the 5h and 7d windows,
+never stands in for a usage or probe reading.
 
 The table carries one row per window:
 
@@ -316,6 +352,9 @@ there is room. That covers a missing
 `clusage`, a probe that fails, and a table that parses but carries no 5h or no
 7d row. A partial table is the dangerous case: a missing 7d row leaves the hard
 cut unenforced, which is the one thing this guard exists to prevent.
+
+That deny also quotes the error `clusage` printed, so a rejected login or a 429
+names its cause and its fix in the message the agent sees.
 
 A denied agent cannot repair `clusage`, so that deny carries its own way out. It
 gives the user two commands, `clusage usage -force` to see the underlying error
@@ -552,9 +591,11 @@ starts empty on purpose, so pick one before the first reading:
 ```json
 {
   "source": "",
+  "fallback": "",
   "model": "claude-haiku-4-5",
   "threshold_minutes": 5,
   "fetch_cron": "*/15 * * * *",
+  "probe_cron": "",
   "history_hours": 168,
   "guard": {
     "soft_5h_percent": 90,
@@ -576,9 +617,11 @@ starts empty on purpose, so pick one before the first reading:
 | Field | Meaning |
 |---|---|
 | `source` | `statusline`, `usage`, `probe` or `auto`. Required. See [Sources](#sources). |
+| `fallback` | A source to try when `source` fails, or empty for none. See [Fallback](#fallback). |
 | `model` | Which model the probe pings. Cheaper models report the same headers. |
 | `threshold_minutes` | How long `clusage usage` reuses a cached reading. |
 | `fetch_cron` | Schedule for the automatic fetch. Empty disables it. |
+| `probe_cron` | Schedule for a probe call, whatever `source` is. Empty disables it. |
 | `history_hours` | How far back the history graphs may read. |
 | `guard` | The guard rail hook's thresholds. See [Guard rail settings](#guard-rail-settings). |
 
@@ -611,14 +654,31 @@ schedule, so this is how you get a fetch at 09:05 and 18:35 but not at 09:35.
 | `5 9 * * *;35 18 * * *` | 09:05 and 18:35 |
 | An empty string | Never. Auto-fetch is off |
 
-The tab bar shows the active schedule, and marks the last scheduled fetch with
-`✓` or `✗`. A scheduled fetch that fails leaves the last good reading on
-screen, so the display never blanks while you are away from it.
+`probe_cron` takes the same form. On each minute it selects, the TUI sends a
+probe call, whatever `source` and `fallback` say. A probe call counts as use,
+so it starts a 5h window. Use it to start a window before you sit down, or to
+get every window at times the usage endpoint is busy. A minute that both
+schedules select sends only the probe, because a probe reads every window. A
+probe minute that arrives during another fetch waits for that fetch to end,
+and then sends the probe.
+
+| `probe_cron` value | Fires |
+|---|---|
+| `0 7 * * 1-5` | 07:00 on weekdays, so a 5h window resets at 12:00 |
+| An empty string | Never |
+
+The tab bar shows both schedules, and marks the last scheduled fetch with
+`✓` or `✗`. A `✓ unchanged` mark means the fetch returned the reading already
+on screen, which is normal for the `statusline` source while no session runs.
+A scheduled fetch that fails leaves the last good reading on screen, so the
+display never blanks while you are away from it.
 
 Two limits worth knowing:
 
-- **The schedule only runs while the TUI is open.** Nothing accumulates in the
-  background, so history is sparse until clusage has been open a few times.
+- **The schedules only run while the TUI is open.** Nothing accumulates in the
+  background, so history is sparse until clusage has been open a few times. To
+  probe with the TUI closed, run `clusage usage -source probe -force` from
+  cron or Task Scheduler.
 - **`day-of-month` and `day-of-week` are ANDed.** Standard cron ORs them when
   both are restricted. Avoid restricting both in one expression.
 
@@ -633,6 +693,10 @@ go vet ./...
 bash hooks/clusage-guard.test.sh   # hook decisions, resume report, registration
 vhs demo/clusage.tape              # re-record the README demo, see demo/README.md
 ```
+
+`TestGuardHookEndToEnd` builds clusage, starts a fake API, and runs the real
+hook script against both. It needs `bash` and `go` on the PATH, and it skips on
+Windows and under `go test -short`.
 
 `TestRenderTabs` drives the model through `Update` and logs each tab, so
 `go test -run TestRenderTabs -v .` prints the whole UI without a terminal.

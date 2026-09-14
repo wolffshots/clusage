@@ -112,18 +112,20 @@ func usage(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Checked before the cache, so an unset source is reported even while a
-	// stored reading is fresh enough to print.
-	if !slices.Contains(sources, cfg.Source) {
-		return errNoSource(cfgPath, cfg.Source)
-	}
 	fs := flag.NewFlagSet("usage", flag.ContinueOnError)
+	source := fs.String("source", cfg.Source, "source to read, overriding config.json")
 	model := fs.String("model", cfg.Model, "model to ping")
 	threshold := fs.Int("threshold", cfg.ThresholdMinutes, "minutes before a new call is made")
 	force := fs.Bool("force", false, "ignore the cache and call the API")
 	verbose := fs.Bool("verbose", false, "print every rate limit header")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	cfg.Source = *source
+	// Checked before the cache, so an unset source is reported even while a
+	// stored reading is fresh enough to print.
+	if !slices.Contains(sources, cfg.Source) {
+		return errNoSource(cfgPath, cfg.Source)
 	}
 
 	db, err := openDB()
@@ -133,7 +135,7 @@ func usage(args []string) error {
 	defer db.Close()
 
 	now := time.Now()
-	last, ok, err := latestReading(db)
+	last, ok, err := latestReadingFrom(db, cfg.readingModels(*model)...)
 	if err != nil {
 		return err
 	}
@@ -220,5 +222,5 @@ func report(r Reading, hist []Reading, now time.Time, cached bool, verbose bool)
 	if cached {
 		src = "cached"
 	}
-	fmt.Printf("\n%s, %s ago (%s)\n", src, age, r.Model)
+	fmt.Printf("\n%s, %s ago (%s)\n", src, age, readingSource(r))
 }

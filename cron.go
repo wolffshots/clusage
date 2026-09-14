@@ -6,13 +6,12 @@ import (
 	"time"
 )
 
-// fetchDue reports whether the configured schedule selects the minute
-// containing t. The schedule is one or more cron expressions separated by ";",
+// cronDue reports whether a schedule selects the minute containing t. The schedule is one or more cron expressions separated by ";",
 // as one expression cannot always cover a schedule (for example a fetch at
 // 18:05 but not at 18:35). An empty or invalid schedule never matches, which
 // disables auto-fetching.
-func (c Config) fetchDue(t time.Time) bool {
-	for _, expr := range strings.Split(c.FetchCron, ";") {
+func cronDue(sched string, t time.Time) bool {
+	for _, expr := range strings.Split(sched, ";") {
 		if cronMatches(expr, t) {
 			return true
 		}
@@ -134,10 +133,10 @@ func cronValid(sched string) bool {
 
 // nextFetch scans forward minute by minute for the next match, up to a week
 // ahead. It returns ok=false for a schedule that never fires.
-func nextFetch(c Config, from time.Time) (time.Time, bool) {
+func nextFetch(sched string, from time.Time) (time.Time, bool) {
 	t := from.Truncate(time.Minute).Add(time.Minute)
 	for i := 0; i < 7*24*60; i++ {
-		if c.fetchDue(t) {
+		if cronDue(sched, t) {
 			return t, true
 		}
 		t = t.Add(time.Minute)

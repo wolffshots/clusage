@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	_ "modernc.org/sqlite"
 )
 
@@ -23,12 +26,19 @@ type Config struct {
 	// statusline" stored, "usage" reads the OAuth usage endpoint, "probe" sends
 	// a probe call, and "auto" tries usage, statusline, probe in that order.
 	// It has no default: readUsage refuses to run until it is set.
-	Source           string `json:"source"`
+	Source string `json:"source"`
+	// Fallback is the source tried when Source fails, or "" for none. It takes
+	// any source but auto, and auto ignores it.
+	Fallback         string `json:"fallback"`
 	Model            string `json:"model"`
 	ThresholdMinutes int    `json:"threshold_minutes"`
 	// FetchCron is one or more 5-field cron expressions separated by ";".
 	// Empty disables the TUI auto-fetch.
 	FetchCron string `json:"fetch_cron"`
+	// ProbeCron is a second schedule, in the same form, that reads the probe
+	// source whatever Source says. A probe call starts a 5h window. Empty
+	// disables it.
+	ProbeCron string `json:"probe_cron"`
 	// HistoryHours is how far back the history graphs read. 0 uses the default.
 	HistoryHours int `json:"history_hours"`
 	// Guard holds the guard rail hook's settings.
@@ -276,6 +286,26 @@ type Reading struct {
 	FetchedAt time.Time
 	Model     string
 	Headers   map[string]string
+	// Fallback is true when an earlier source in the chain failed first. It is
+	// not stored, so a reading read back from the database never carries it.
+	Fallback bool
+}
+
+// readingSource names where a reading came from, as "usage", "statusline" or
+// "probe <model>", with ", fallback" when an earlier source failed first. A
+// probe reading is stored under its model name, so any other model is a probe.
+func readingSource(r Reading) string {
+	s := "probe " + r.Model
+	switch r.Model {
+	case usageAPIModel:
+		s = "usage"
+	case statuslineModel:
+		s = "statusline"
+	}
+	if r.Fallback {
+		s += ", fallback"
+	}
+	return s
 }
 
 func openDB() (*sql.DB, error) {
@@ -298,15 +328,24 @@ func openDB() (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS readings (
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// migrate creates the tables. It is apart from openDB so a test can run it on
+// an in-memory database.
+func migrate(db *sql.DB) error {
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS readings (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		fetched_at TEXT NOT NULL,
 		model TEXT NOT NULL,
 		headers TEXT NOT NULL
 	)`)
 	if err != nil {
-		db.Close()
-		return nil, err
+		return err
 	}
 	// Separate table rather than columns on readings: a reading is written even
 	// when the API rejects the call and reports no usage, so the two are not
@@ -321,10 +360,102 @@ func openDB() (*sql.DB, error) {
 		cache_read INTEGER NOT NULL
 	)`)
 	if err != nil {
-		db.Close()
+		return err
+	}
+	// One row per failed usage or probe read. status is the HTTP status, 0 for
+	// a failure with none. retry_at is empty unless the failure was a 429.
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS fetch_errors (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		at TEXT NOT NULL,
+		source TEXT NOT NULL,
+		status INTEGER NOT NULL,
+		retry_at TEXT NOT NULL,
+		message TEXT NOT NULL
+	)`)
+	return err
+}
+
+// errorKeep is how long a failed read stays in fetch_errors. The TUI counts
+// one day, and a stuck hook can add thousands of rows a day.
+const errorKeep = 7 * 24 * time.Hour
+
+// saveFetchError records one failed read, and deletes the rows older than
+// errorKeep. A 429 also records when the source may be called again.
+func saveFetchError(db *sql.DB, source string, err error, now time.Time) error {
+	status, retryAt := 0, ""
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		status = apiErr.StatusCode
+		if status == http.StatusTooManyRequests {
+			retryAt = now.Add(backoffFor(db, source, apiErr.Response, now)).UTC().Format(time.RFC3339Nano)
+		}
+	}
+	_, err = db.Exec(`INSERT INTO fetch_errors (at, source, status, retry_at, message) VALUES (?, ?, ?, ?, ?)`,
+		now.UTC().Format(time.RFC3339Nano), source, status, retryAt, err.Error())
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`DELETE FROM fetch_errors WHERE at < ?`, now.Add(-errorKeep).UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// backoffFor is how long to leave source alone after a 429. A retry-after
+// header in seconds wins. Without one the wait doubles with each 429 of the
+// last hour, from defaultBackoff up to maxBackoff, so an endpoint that keeps
+// refusing is asked less and less often. An hour with no 429 starts over.
+func backoffFor(db *sql.DB, source string, resp *http.Response, now time.Time) time.Duration {
+	if resp != nil {
+		if secs, err := strconv.Atoi(resp.Header.Get("retry-after")); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	var n int
+	// A failed count reads as none, which gives the shortest wait.
+	_ = db.QueryRow(`SELECT COUNT(*) FROM fetch_errors WHERE source = ? AND status = ? AND at >= ?`,
+		source, http.StatusTooManyRequests, now.Add(-time.Hour).UTC().Format(time.RFC3339Nano)).Scan(&n)
+	if wait := defaultBackoff << min(n, 8); wait < maxBackoff {
+		return wait
+	}
+	return maxBackoff
+}
+
+// backoffUntil returns when the newest failure of source said to call again.
+// ok is false when that failure set no wait, or nothing could be read.
+func backoffUntil(db *sql.DB, source string) (time.Time, bool) {
+	var retryAt string
+	if err := db.QueryRow(`SELECT retry_at FROM fetch_errors WHERE source = ? ORDER BY id DESC LIMIT 1`,
+		source).Scan(&retryAt); err != nil || retryAt == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, retryAt)
+	return t, err == nil
+}
+
+// errorCount is how many reads of one source failed with one status.
+type errorCount struct {
+	Source string
+	Status int
+	N      int
+}
+
+// fetchErrorCounts groups the failures at or after since by source and status.
+func fetchErrorCounts(db *sql.DB, since time.Time) ([]errorCount, error) {
+	rows, err := db.Query(`SELECT source, status, COUNT(*) FROM fetch_errors
+		WHERE at >= ? GROUP BY source, status ORDER BY source, status`,
+		since.UTC().Format(time.RFC3339Nano))
+	if err != nil {
 		return nil, err
 	}
-	return db, nil
+	defer rows.Close()
+	var out []errorCount
+	for rows.Next() {
+		var c errorCount
+		if err := rows.Scan(&c.Source, &c.Status, &c.N); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // TokenSample is one probe call and what it cost.
@@ -404,16 +535,22 @@ func saveReading(db *sql.DB, r Reading) error {
 
 // latestReading returns the newest cached reading, or ok=false when the table is empty.
 func latestReading(db *sql.DB) (Reading, bool, error) {
-	return latestReadingFrom(db, "")
+	return latestReadingFrom(db)
 }
 
-// latestReadingFrom returns the newest reading stored under model, or the
-// newest of any when model is empty.
-func latestReadingFrom(db *sql.DB, model string) (Reading, bool, error) {
-	var ts, blob string
-	err := db.QueryRow(`SELECT fetched_at, model, headers FROM readings
-		WHERE ? = '' OR model = ? ORDER BY id DESC LIMIT 1`, model, model).
-		Scan(&ts, &model, &blob)
+// latestReadingFrom returns the newest reading stored under any of models, or
+// the newest of any model when none are named.
+func latestReadingFrom(db *sql.DB, models ...string) (Reading, bool, error) {
+	q := `SELECT fetched_at, model, headers FROM readings`
+	args := make([]any, len(models))
+	if len(models) > 0 {
+		q += ` WHERE model IN (?` + strings.Repeat(`, ?`, len(models)-1) + `)`
+		for i, m := range models {
+			args[i] = m
+		}
+	}
+	var ts, model, blob string
+	err := db.QueryRow(q+` ORDER BY id DESC LIMIT 1`, args...).Scan(&ts, &model, &blob)
 	if err == sql.ErrNoRows {
 		return Reading{}, false, nil
 	}

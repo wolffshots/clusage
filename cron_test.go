@@ -42,7 +42,7 @@ func TestCronValidAgreesWithNextFetch(t *testing.T) {
 		"5/15 * * * *",
 	}
 	for _, sched := range scheds {
-		_, ok := nextFetch(Config{FetchCron: sched}, at("2026-08-24 10:00"))
+		_, ok := nextFetch(sched, at("2026-08-24 10:00"))
 		if valid := cronValid(sched); valid != ok {
 			t.Errorf("cronValid(%q) = %v but nextFetch ok = %v", sched, valid, ok)
 		}

@@ -108,6 +108,11 @@ run "$no_status" allow ""
 run "" deny "no usable rate limit window"
 run "clusage: no usable anthropic-ratelimit-unified-* headers on the response" \
   deny "no usable rate limit window"
+# The deny carries the error clusage printed, so a rejected login names its fix.
+# Every line of the error joins the one line of the deny.
+run "clusage: the API rejected the OAuth token (401 Unauthorized). Run claude to log in again.
+usage: GET \"https://api.anthropic.com/api/oauth/usage\": 401 Unauthorized" \
+  deny "The error from clusage: the API rejected the OAuth token (401 Unauthorized). Run claude to log in again. usage: GET"
 # A partial table is the same condition. A missing 7d row leaves the hard cut
 # unenforced, which is exactly what this deny exists to prevent.
 run "5h  61% used  allowed  resets Wed 19:30 (in 4h)" deny "no usable rate limit window"

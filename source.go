@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,7 +19,8 @@ import (
 // usageAPIModel marks a reading that came from the OAuth usage endpoint.
 const usageAPIModel = "usage-api"
 
-// sources are the accepted config values. auto walks the other three in order.
+// sources are the accepted "source" values. auto walks the other three in
+// order. "fallback" takes any of them but auto.
 var sources = []string{"statusline", "usage", "probe", "auto"}
 
 // errNoSource is what a reading fails with until config.json names a source.
@@ -31,72 +33,164 @@ func errNoSource(path, got string) error {
 	return fmt.Errorf(`unknown source %q in %s: want one of: %s. Run clusage help to compare them`, got, path, strings.Join(sources, ", "))
 }
 
-// readUsage gets one reading from the configured source. auto tries the usage
-// endpoint, then a status line reading no older than the threshold, then the
-// probe call. fresh is false when the reading came out of the database, so the
-// caller does not store it a second time.
+// errBadFallback is what a reading fails with when "fallback" names no single
+// source. auto is not a fallback, because it is a chain of its own.
+func errBadFallback(path, got string) error {
+	return fmt.Errorf(`unknown fallback %q in %s: want statusline, usage, probe, or "" for none`, got, path)
+}
+
+// chain is the order readUsage tries the sources in. auto walks usage,
+// statusline and probe. Any other source is tried alone, then its fallback.
+func (c Config) chain() []string {
+	switch {
+	case c.Source == "auto":
+		return []string{"usage", "statusline", "probe"}
+	case c.Fallback != "" && c.Fallback != c.Source:
+		return []string{c.Source, c.Fallback}
+	}
+	return []string{c.Source}
+}
+
+// readingModels names the models a cached reading may come from, so a status
+// line row cannot stand in for a usage reading that carries more windows. nil
+// means any model, which is what auto takes.
+func (c Config) readingModels(model string) []string {
+	if c.Source == "auto" {
+		return nil
+	}
+	var out []string
+	for _, src := range c.chain() {
+		switch src {
+		case "usage":
+			out = append(out, usageAPIModel)
+		case "probe":
+			out = append(out, model)
+		case "statusline":
+			out = append(out, statuslineModel)
+		}
+	}
+	return out
+}
+
+// defaultBackoff and maxBackoff bound how long a 429 with no retry-after header
+// keeps the usage endpoint from being called again. See backoffFor.
+const (
+	defaultBackoff = time.Minute
+	maxBackoff     = 15 * time.Minute
+)
+
+// readUsage gets one reading from the configured source, and tries the next
+// source in the chain when one fails. fresh is false when the reading came out
+// of the database, so the caller does not store it a second time.
 //
-// Every source that fails adds its reason to the error, so a failed auto run
-// says why each step was skipped rather than only the last one.
+// Every usage or probe failure is stored in fetch_errors, so the TUI can count
+// the failures of every run, the guard rail hook's included. Every source that
+// fails adds its reason to the error, so a failed chain says why each step was
+// skipped rather than only the last one.
 func readUsage(ctx context.Context, db *sql.DB, cfg Config, cfgPath, model string) (r Reading, used tokenUse, fresh bool, err error) {
 	if !slices.Contains(sources, cfg.Source) {
 		return Reading{}, tokenUse{}, false, errNoSource(cfgPath, cfg.Source)
 	}
-	try := func(src string) bool { return cfg.Source == "auto" || cfg.Source == src }
-	var errs []error
+	if cfg.Fallback != "" && (cfg.Fallback == "auto" || !slices.Contains(sources, cfg.Fallback)) {
+		return Reading{}, tokenUse{}, false, errBadFallback(cfgPath, cfg.Fallback)
+	}
 
 	var token string
 	var tokenErr error
-	if try("usage") || try("probe") {
-		token, tokenErr = loadToken()
-	}
-
-	if try("usage") {
-		if tokenErr != nil {
-			errs = append(errs, fmt.Errorf("usage: %w", tokenErr))
-		} else if h, err := fetchOAuthUsage(ctx, token); err != nil {
-			errs = append(errs, fmt.Errorf("usage: %w", err))
-		} else {
-			return Reading{FetchedAt: time.Now(), Model: usageAPIModel, Headers: h}, tokenUse{}, true, nil
+	tokenRead := false
+	tok := func() (string, error) {
+		if !tokenRead {
+			token, tokenErr = loadToken()
+			tokenRead = true
 		}
+		return token, tokenErr
 	}
 
-	if try("statusline") {
-		last, ok, err := latestReadingFrom(db, statuslineModel)
-		maxAge := time.Duration(cfg.ThresholdMinutes) * time.Minute
-		switch {
-		case err != nil:
-			errs = append(errs, fmt.Errorf("statusline: %w", err))
-		case !ok:
-			errs = append(errs, errors.New("statusline: no reading yet"))
-		// An explicit statusline source takes the last reading however old,
-		// because there is nothing else to fall back on. In auto a stale one
-		// gives way to the probe, which can read now.
-		case cfg.Source == "auto" && time.Since(last.FetchedAt) > maxAge:
-			errs = append(errs, fmt.Errorf("statusline: last reading is %s old",
-				time.Since(last.FetchedAt).Round(time.Second)))
-		default:
-			return last, tokenUse{}, false, nil
-		}
-	}
-
-	if try("probe") {
-		if tokenErr != nil {
-			errs = append(errs, fmt.Errorf("probe: %w", tokenErr))
-		} else {
-			h, used, err := fetchUsage(ctx, token, model)
-			switch {
-			case err != nil:
-				errs = append(errs, fmt.Errorf("probe: %w", err))
-			case len(h) == 0:
-				errs = append(errs, errors.New("probe: no usable anthropic-ratelimit-unified-* headers on the response"))
-			default:
-				return Reading{FetchedAt: time.Now(), Model: model, Headers: h}, used, true, nil
+	chain := cfg.chain()
+	var errs []error
+	var last error
+	for i, src := range chain {
+		// The endpoint answers 429 often. Calling it again inside the wait it
+		// asked for only earns another 429, so go straight to the next step.
+		if src == "usage" {
+			if until, ok := backoffUntil(db, src); ok && time.Now().Before(until) {
+				last = fmt.Errorf("usage: waiting out a 429 until %s", until.Local().Format("15:04:05"))
+				errs = append(errs, last)
+				continue
 			}
 		}
+		r, used, fresh, err := readFrom(ctx, db, cfg, src, model, i < len(chain)-1, tok)
+		if err == nil {
+			r.Fallback = i > 0
+			return r, used, fresh, nil
+		}
+		if src != "statusline" {
+			// A failed write must not fail the read. The count is a report, and
+			// the next source may still answer.
+			_ = saveFetchError(db, src, err, time.Now())
+		}
+		last = fmt.Errorf("%s: %w", src, err)
+		errs = append(errs, last)
 	}
 
-	return Reading{}, tokenUse{}, false, errors.Join(errs...)
+	err = errors.Join(errs...)
+	var apiErr *anthropic.Error
+	if errors.As(last, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
+		// The guard rail hook shows the first line of this error to the agent,
+		// so the cause and the fix lead, and the detail follows.
+		err = fmt.Errorf("the API rejected the OAuth token (401 Unauthorized). Run claude to log in again. If you set CLAUDE_CODE_OAUTH_TOKEN or ran clusage setup, replace that token with a new one from claude setup-token.\n%w", err)
+	}
+	return Reading{}, tokenUse{}, false, err
+}
+
+// readFrom gets one reading from one source. more is true when another source
+// follows in the chain, so a stale status line reading gives way to it.
+func readFrom(ctx context.Context, db *sql.DB, cfg Config, src, model string, more bool, tok func() (string, error)) (Reading, tokenUse, bool, error) {
+	switch src {
+	case "usage":
+		token, err := tok()
+		if err != nil {
+			return Reading{}, tokenUse{}, false, err
+		}
+		h, err := fetchOAuthUsage(ctx, token)
+		if err != nil {
+			return Reading{}, tokenUse{}, false, err
+		}
+		return Reading{FetchedAt: time.Now(), Model: usageAPIModel, Headers: h}, tokenUse{}, true, nil
+
+	case "statusline":
+		last, ok, err := latestReadingFrom(db, statuslineModel)
+		// A row is written only when the numbers change, so a row under a minute
+		// old is current even when the caller asked for no cache at all.
+		maxAge := max(time.Duration(cfg.ThresholdMinutes)*time.Minute, time.Minute)
+		switch {
+		case err != nil:
+			return Reading{}, tokenUse{}, false, err
+		case !ok:
+			return Reading{}, tokenUse{}, false, errors.New("no reading yet")
+		// The last step in the chain takes the last reading however old,
+		// because there is nothing else to fall back on. Before another step a
+		// stale one gives way, because that step can read now.
+		case more && time.Since(last.FetchedAt) > maxAge:
+			return Reading{}, tokenUse{}, false, fmt.Errorf("last reading is %s old",
+				time.Since(last.FetchedAt).Round(time.Second))
+		}
+		return last, tokenUse{}, false, nil
+
+	default: // probe
+		token, err := tok()
+		if err != nil {
+			return Reading{}, tokenUse{}, false, err
+		}
+		h, used, err := fetchUsage(ctx, token, model)
+		switch {
+		case err != nil:
+			return Reading{}, tokenUse{}, false, err
+		case len(h) == 0:
+			return Reading{}, tokenUse{}, false, errors.New("no usable anthropic-ratelimit-unified-* headers on the response")
+		}
+		return Reading{FetchedAt: time.Now(), Model: model, Headers: h}, used, true, nil
+	}
 }
 
 // fetchOAuthUsage reads the account's limit windows from the OAuth usage
