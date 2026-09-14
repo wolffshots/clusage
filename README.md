@@ -216,6 +216,13 @@ scope, clusage tries the next token in the list. So a `clusage` keychain entry
 does not block the `usage` source while a Claude Code login is also present.
 The probe keeps the first token that works.
 
+A token that fails the scope check once is not sent to the usage endpoint
+again. Clusage keeps a hash of it, never the token, in the database. A token's
+scopes do not change, so every later call would be refused, and those calls
+earn the token a 429. A 429 does not move on to the next token. It ends the
+read, and the `usage` source waits it out, because a request sent again with
+another token would work around the rate limit.
+
 When no token has the scope, the `usage` error says so and names the fix. The
 Config tab shows where the first token comes from.
 

@@ -288,6 +288,11 @@ func TestUsageTriesTheNextTokenOnAScopeError(t *testing.T) {
 	if _, _, _, err := readUsage(ctx, db, Config{Source: "probe"}, "/c.json", "m"); err != nil || strings.Join(probeTokens, ",") != "narrow" {
 		t.Fatalf("probe: err=%v probe tokens=%v, want the first token only", err, probeTokens)
 	}
+	// The next usage read does not send the narrow token again. Every such
+	// call is a certain 403, and the calls earn the token a 429.
+	if _, _, _, err := readUsage(ctx, db, Config{Source: "usage"}, "/c.json", "m"); err != nil || strings.Join(usageTokens, ",") != "narrow,wide,wide" {
+		t.Fatalf("second read: err=%v usage tokens=%v", err, usageTokens)
+	}
 
 	// Only the narrow token: the read fails, and the error leads with the
 	// missing scope and the fix, then names where the token came from.
@@ -304,8 +309,39 @@ func TestUsageTriesTheNextTokenOnAScopeError(t *testing.T) {
 	if counts, _ := fetchErrorCounts(db, time.Now().Add(-time.Hour)); len(counts) != 1 || counts[0].Status != http.StatusForbidden {
 		t.Fatalf("counts = %+v", counts)
 	}
+	// A known narrow token is not sent again, and the error still names the fix.
+	sent := len(usageTokens)
+	_, _, _, err = readUsage(ctx, db, Config{Source: "usage"}, "/c.json", "m")
+	if first, _, _ := strings.Cut(fmt.Sprint(err), "\n"); len(usageTokens) != sent || !strings.Contains(first, "user:profile") {
+		t.Fatalf("known narrow token: sent %d more, err = %v", len(usageTokens)-sent, err)
+	}
 	if _, _, _, err := readUsage(ctx, db, Config{Source: "probe"}, "/c.json", "m"); err != nil {
 		t.Fatalf("probe with the narrow token: %v", err)
+	}
+}
+
+// A 429 ends the read at the token that got it. Sending the request again with
+// another of the user's tokens would sidestep the rate limit, so the read fails
+// and the source waits the 429 out, whichever token got it.
+func TestUsage429EndsTheRead(t *testing.T) {
+	var usageTokens []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		usageTokens = append(usageTokens, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+		w.Header().Set("retry-after", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`))
+	}))
+	defer srv.Close()
+	t.Setenv("ANTHROPIC_BASE_URL", srv.URL)
+	fakeTokens(t, "first", "second")
+	db := memDB(t)
+
+	if _, _, _, err := readUsage(context.Background(), db, Config{Source: "usage"}, "/c.json", "m"); err == nil || strings.Join(usageTokens, ",") != "first" {
+		t.Fatalf("err=%v usage tokens=%v, want only the first token asked", err, usageTokens)
+	}
+	if _, _, _, err := readUsage(context.Background(), db, Config{Source: "usage"}, "/c.json", "m"); err == nil ||
+		!strings.Contains(err.Error(), "waiting out a 429") || len(usageTokens) != 1 {
+		t.Fatalf("inside the wait: err=%v usage tokens=%v", err, usageTokens)
 	}
 }
 
@@ -319,7 +355,7 @@ func TestTokensSkipAndName(t *testing.T) {
 		{"expired", func() (string, error) { return "", errors.New("has expired") }},
 	}
 	var ts tokens
-	if _, err := ts.use(func(string) error { return nil }, nil); err == nil || !strings.Contains(err.Error(), "expired: has expired") {
+	if _, err := ts.use(func(string) error { return nil }, nil, nil); err == nil || !strings.Contains(err.Error(), "expired: has expired") {
 		t.Fatalf("err = %v", err)
 	}
 	if _, where, err := firstToken(); where != "" || err == nil {
@@ -330,7 +366,7 @@ func TestTokensSkipAndName(t *testing.T) {
 		t.Fatalf("firstToken = %q %q %v", tok, where, err)
 	}
 	tokenSources = tokenSources[:1]
-	if _, err := (&tokens{}).use(func(string) error { return nil }, nil); !errors.Is(err, errNoToken) {
+	if _, err := (&tokens{}).use(func(string) error { return nil }, nil, nil); !errors.Is(err, errNoToken) {
 		t.Fatalf("no token: err = %v", err)
 	}
 }

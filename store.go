@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -267,10 +269,12 @@ type tokenResult struct {
 }
 
 // use calls try with each token in order. It stops at the first success, and
-// at the first failure that retry does not accept. Every failure is named by
-// the place its token came from. last is the final failure try returned, so a
-// caller can tell why the last token was refused.
-func (ts *tokens) use(try func(token string) error, retry func(error) bool) (last, err error) {
+// at the first failure that retry does not accept. A token that skip returns an
+// error for is not tried, and counts as that failure, so the next token is. A
+// nil skip tries every token. Every failure is named by the place its token
+// came from. last is the final failure, so a caller can tell why the last token
+// was refused.
+func (ts *tokens) use(try func(token string) error, retry func(error) bool, skip func(token string) error) (last, err error) {
 	var errs []error
 	for i, src := range tokenSources {
 		if i == len(ts.loaded) {
@@ -285,6 +289,12 @@ func (ts *tokens) use(try func(token string) error, retry func(error) bool) (las
 		if c.token == "" {
 			continue
 		}
+		if skip != nil {
+			if last = skip(c.token); last != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", c.where, last))
+				continue
+			}
+		}
 		last = try(c.token)
 		if last == nil {
 			return nil, nil
@@ -298,6 +308,37 @@ func (ts *tokens) use(try func(token string) error, retry func(error) bool) (las
 		return nil, errNoToken
 	}
 	return last, errors.Join(errs...)
+}
+
+// errNarrowToken marks a token that an earlier read found to lack the
+// user:profile scope. A token's scopes never change, so clusage stops sending it
+// to the usage endpoint. Every such call is a certain 403, and the extra calls
+// earn the token a 429.
+var errNarrowToken = errors.New("skipped: an earlier read found this token lacks the user:profile scope")
+
+// tokenFingerprint identifies a token in the database without storing it. The
+// hash of a high-entropy secret cannot be turned back into the secret.
+func tokenFingerprint(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:8])
+}
+
+// markNarrow records that token lacks the user:profile scope.
+func markNarrow(db *sql.DB, token string, now time.Time) error {
+	_, err := db.Exec(`INSERT OR IGNORE INTO narrow_tokens (fingerprint, at) VALUES (?, ?)`,
+		tokenFingerprint(token), now.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// narrowToken returns errNarrowToken for a token markNarrow recorded, and nil
+// otherwise. A failed read returns nil, so the token is tried rather than lost.
+func narrowToken(db *sql.DB, token string) error {
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM narrow_tokens WHERE fingerprint = ?`,
+		tokenFingerprint(token)).Scan(&n); err != nil || n == 0 {
+		return nil
+	}
+	return errNarrowToken
 }
 
 // firstToken is the token a read tries first, and where it came from, for the
@@ -453,6 +494,15 @@ func migrate(db *sql.DB) error {
 		status INTEGER NOT NULL,
 		retry_at TEXT NOT NULL,
 		message TEXT NOT NULL
+	)`)
+	if err != nil {
+		return err
+	}
+	// Tokens found to lack the user:profile scope, by fingerprint. A row never
+	// goes stale, because a token's scopes never change.
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS narrow_tokens (
+		fingerprint TEXT PRIMARY KEY,
+		at TEXT NOT NULL
 	)`)
 	return err
 }

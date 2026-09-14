@@ -156,9 +156,19 @@ func readFrom(ctx context.Context, db *sql.DB, cfg Config, src, model string, mo
 		var h map[string]string
 		last, err := ts.use(func(token string) (err error) {
 			h, err = fetchOAuthUsage(ctx, token)
+			if scopeInsufficient(err) {
+				// A failed write only costs one more certain 403 next read.
+				_ = markNarrow(db, token, time.Now())
+			}
 			return err
-		}, func(err error) bool { return unauthorized(err) || scopeInsufficient(err) })
-		if scopeInsufficient(last) {
+		}, func(err error) bool {
+			// A 401 or a missing scope is about the token, so the next token may
+			// work. A 429 ends the read. Sending the same request with another of
+			// the user's tokens would sidestep the endpoint's rate limit, so the
+			// read fails and readUsage waits the 429 out.
+			return unauthorized(err) || scopeInsufficient(err)
+		}, func(token string) error { return narrowToken(db, token) })
+		if scopeInsufficient(last) || errors.Is(last, errNarrowToken) {
 			// The guard rail hook shows the first line, so the fix leads.
 			err = fmt.Errorf("no token has the user:profile scope the usage endpoint needs, and a token from claude setup-token never has it. Log in with claude so clusage can read the Claude Code login, or use the probe source.\n%w", err)
 		}
@@ -196,7 +206,7 @@ func readFrom(ctx context.Context, db *sql.DB, cfg Config, src, model string, mo
 				err = errors.New("no usable anthropic-ratelimit-unified-* headers on the response")
 			}
 			return err
-		}, unauthorized)
+		}, unauthorized, nil)
 		if err != nil {
 			return Reading{}, tokenUse{}, false, err
 		}
