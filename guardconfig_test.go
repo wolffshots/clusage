@@ -176,13 +176,17 @@ func TestReadGuardStatus(t *testing.T) {
 // TestTilde checks the path shortening the Config tab uses. A screenshot of
 // that tab must not carry the user name.
 func TestTilde(t *testing.T) {
-	t.Setenv("HOME", "/Users/someone")
+	// os.UserHomeDir reads USERPROFILE on Windows and HOME elsewhere.
+	home := filepath.FromSlash("/Users/someone")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	for path, want := range map[string]string{
 		"/Users/someone/.config/clusage/config.json": "~/.config/clusage/config.json",
 		"/Users/someone":        "/Users/someone",
 		"/Users/someone-else/x": "/Users/someone-else/x",
 		"/etc/clusage.json":     "/etc/clusage.json",
 	} {
+		path, want = filepath.FromSlash(path), filepath.FromSlash(want)
 		if got := tilde(path); got != want {
 			t.Errorf("tilde(%q) = %q, want %q", path, got, want)
 		}

@@ -22,6 +22,10 @@ const hookScriptName = "clusage-guard.sh"
 // Homebrew repoints <prefix>/share/clusage on every upgrade, so that path
 // stays valid while the Cellar path dies with the version.
 func brewPrefixPath(p string) string {
+	// hookCandidates builds its paths with filepath.Join, which uses backslashes
+	// on Windows. Match on forward slashes so the rewrite reads the same path
+	// the same way on every platform.
+	p = filepath.ToSlash(p)
 	const marker = "/Cellar/"
 	i := strings.Index(p, marker)
 	if i < 0 {

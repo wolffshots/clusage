@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -53,7 +54,7 @@ func TestHookRejectsUnknownAction(t *testing.T) {
 
 func TestHookCandidatesPreferTheStablePrefix(t *testing.T) {
 	got := hookCandidates("/opt/homebrew/bin/clusage")
-	want := "/opt/homebrew/share/clusage/hooks/" + hookScriptName
+	want := filepath.FromSlash("/opt/homebrew/share/clusage/hooks/" + hookScriptName)
 	if len(got) == 0 || got[0] != want {
 		t.Fatalf("hookCandidates()[0] = %q, want %q (all: %v)", got[0], want, got)
 	}
@@ -76,6 +77,9 @@ func TestHookCandidatesFallBackToTheResolvedPath(t *testing.T) {
 	}
 	link := filepath.Join(root, "bin", "clusage")
 	if err := os.Symlink(real, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skip("creating a symlink needs developer mode or admin rights on Windows:", err)
+		}
 		t.Fatal(err)
 	}
 	// On macOS the temp root is itself a symlink, so resolve it before
@@ -102,6 +106,9 @@ func TestBrewPrefixPath(t *testing.T) {
 		"/Cellar/clusage/0.4.1":                                       "",
 	}
 	for in, want := range cases {
+		if want != "" {
+			want = filepath.FromSlash(want)
+		}
 		if got := brewPrefixPath(in); got != want {
 			t.Errorf("brewPrefixPath(%q) = %q, want %q", in, got, want)
 		}
@@ -110,7 +117,7 @@ func TestBrewPrefixPath(t *testing.T) {
 
 func TestHookCandidatesPreferThePrefixOverTheCellar(t *testing.T) {
 	got := hookCandidates("/opt/homebrew/Cellar/clusage/0.4.1/bin/clusage")
-	want := "/opt/homebrew/share/clusage/hooks/" + hookScriptName
+	want := filepath.FromSlash("/opt/homebrew/share/clusage/hooks/" + hookScriptName)
 	if got[0] != want {
 		t.Fatalf("hookCandidates()[0] = %q, want %q (all: %v)", got[0], want, got)
 	}

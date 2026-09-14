@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -109,7 +110,13 @@ func TestOpenDBSetsWALAndBusyTimeout(t *testing.T) {
 
 // A config directory with a space in it must still produce a valid DSN.
 func TestOpenDBHandlesAPathThatNeedsEscaping(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), "my configs?v=1"))
+	// A ? would start the DSN query. Windows forbids it in a file name, so use
+	// #, which would start a URL fragment, there instead.
+	name := "my configs?v=1"
+	if runtime.GOOS == "windows" {
+		name = "my configs#v=1"
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(t.TempDir(), name))
 	db, err := openDB()
 	if err != nil {
 		t.Fatal(err)
