@@ -211,29 +211,111 @@ func saveToken(token string) error {
 // claudeCodeKeychainService is where Claude Code keeps its login on macOS.
 const claudeCodeKeychainService = "Claude Code-credentials"
 
-// loadToken tries the environment, then the clusage keychain entry, then the
-// Claude Code login: the keychain on macOS, a file on Linux and Windows. The
-// security command does not exist off macOS, so both keychain reads fail fast
-// there.
-func loadToken() (string, error) {
-	if t := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); t != "" {
-		return t, nil
+// errNoToken is what a token read fails with when no place holds a token.
+var errNoToken = errors.New("no token found: log in with claude, set CLAUDE_CODE_OAUTH_TOKEN, or run clusage setup on macOS. Run clusage help setup for details")
+
+// tokenSource is one place a token can come from. where names it in errors and
+// on the Config tab. load returns "" and no error when the place holds no
+// token, so the next place is tried.
+type tokenSource struct {
+	where string
+	load  func() (string, error)
+}
+
+// tokenSources lists the places a token may come from, in the order clusage
+// tries them. Tokens differ in scope: one from claude setup-token can call the
+// API but not the usage endpoint, so a refused token gives way to the next.
+// A test replaces the list, because the real one runs the keychain.
+var tokenSources = []tokenSource{
+	{"CLAUDE_CODE_OAUTH_TOKEN", func() (string, error) { return os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), nil }},
+	{"the " + keychainService + " keychain entry", func() (string, error) { return keychainPassword(keychainService), nil }},
+	{"the Claude Code login", claudeCodeLoginToken},
+}
+
+// keychainPassword reads one macOS keychain entry, or "" when it is missing.
+// The security command does not exist off macOS, so the read fails fast there.
+func keychainPassword(service string) string {
+	out, err := exec.Command("security", "find-generic-password", "-s", service, "-w").Output()
+	if err != nil {
+		return ""
 	}
-	out, err := exec.Command("security", "find-generic-password",
-		"-s", keychainService, "-w").Output()
-	if t := strings.TrimSpace(string(out)); err == nil && t != "" {
-		return t, nil
-	}
-	out, err = exec.Command("security", "find-generic-password",
-		"-s", claudeCodeKeychainService, "-w").Output()
-	if err == nil {
-		return claudeCodeLogin(out, "the "+claudeCodeKeychainService+" keychain entry")
+	return strings.TrimSpace(string(out))
+}
+
+// claudeCodeLoginToken reads the Claude Code login: the keychain on macOS, a
+// file on Linux and Windows. No login at all is "" and no error.
+func claudeCodeLoginToken() (string, error) {
+	if raw := keychainPassword(claudeCodeKeychainService); raw != "" {
+		return claudeCodeLogin([]byte(raw), "the "+claudeCodeKeychainService+" keychain entry")
 	}
 	t, err := claudeCodeToken()
 	if errors.Is(err, fs.ErrNotExist) {
-		return "", errors.New("no token found: log in with claude, set CLAUDE_CODE_OAUTH_TOKEN, or run clusage setup on macOS. Run clusage help setup for details")
+		return "", nil
 	}
 	return t, err
+}
+
+// tokens loads the token sources in order, each at most once, so a read can
+// move on to the next token without running the keychain again.
+type tokens struct {
+	loaded []tokenResult
+}
+
+type tokenResult struct {
+	token, where string
+	err          error
+}
+
+// use calls try with each token in order. It stops at the first success, and
+// at the first failure that retry does not accept. Every failure is named by
+// the place its token came from. last is the final failure try returned, so a
+// caller can tell why the last token was refused.
+func (ts *tokens) use(try func(token string) error, retry func(error) bool) (last, err error) {
+	var errs []error
+	for i, src := range tokenSources {
+		if i == len(ts.loaded) {
+			t, err := src.load()
+			ts.loaded = append(ts.loaded, tokenResult{t, src.where, err})
+		}
+		c := ts.loaded[i]
+		if c.err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", c.where, c.err))
+			continue
+		}
+		if c.token == "" {
+			continue
+		}
+		last = try(c.token)
+		if last == nil {
+			return nil, nil
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", c.where, last))
+		if !retry(last) {
+			break
+		}
+	}
+	if len(errs) == 0 {
+		return nil, errNoToken
+	}
+	return last, errors.Join(errs...)
+}
+
+// firstToken is the token a read tries first, and where it came from, for the
+// Config tab.
+func firstToken() (token, where string, err error) {
+	for _, src := range tokenSources {
+		t, lerr := src.load()
+		switch {
+		case lerr != nil && err == nil:
+			err = fmt.Errorf("%s: %w", src.where, lerr)
+		case lerr == nil && t != "":
+			return t, src.where, nil
+		}
+	}
+	if err == nil {
+		err = errNoToken
+	}
+	return "", "", err
 }
 
 // claudeCodeToken reads the access token from the .credentials.json file that
@@ -277,7 +359,7 @@ func claudeCodeLogin(raw []byte, where string) (string, error) {
 	case c.OAuth.AccessToken == "":
 		return "", fmt.Errorf("no Claude Code login in %s", where)
 	case c.OAuth.ExpiresAt > 0 && time.Now().UnixMilli() >= c.OAuth.ExpiresAt:
-		return "", errors.New("the Claude Code login has expired: run claude once to refresh it")
+		return "", fmt.Errorf("the login in %s has expired: run claude once to refresh it", where)
 	}
 	return c.OAuth.AccessToken, nil
 }

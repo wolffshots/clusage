@@ -128,7 +128,7 @@ func TestReadUsageFallsBackToTheProbe(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv("ANTHROPIC_BASE_URL", srv.URL)
-	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+	fakeTokens(t, "tok")
 	db := memDB(t)
 
 	// No source set is an error that names every choice, and calls nothing.
@@ -205,6 +205,7 @@ func fakeAPI(t *testing.T, usageStatus, probeStatus int, usageCalls, probeCalls 
 				w.Write([]byte(errBody))
 				return
 			}
+			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"five_hour":{"utilization":10},"seven_day":{"utilization":20}}`))
 			return
 		}
@@ -222,7 +223,116 @@ func fakeAPI(t *testing.T, usageStatus, probeStatus int, usageCalls, probeCalls 
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("ANTHROPIC_BASE_URL", srv.URL)
+	// The environment is for TestGuardHookEndToEnd, whose clusage runs in a
+	// process of its own.
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+	fakeTokens(t, "tok")
+}
+
+// fakeTokens replaces the token sources with fixed tokens, tried in order, so
+// a test never reads the keychain or a real Claude Code login.
+func fakeTokens(t *testing.T, toks ...string) {
+	t.Helper()
+	old := tokenSources
+	t.Cleanup(func() { tokenSources = old })
+	tokenSources = nil
+	for i, tok := range toks {
+		tokenSources = append(tokenSources, tokenSource{
+			where: fmt.Sprintf("token %d", i+1),
+			load:  func() (string, error) { return tok, nil },
+		})
+	}
+}
+
+// A token from claude setup-token lacks user:profile, and the usage endpoint
+// answers it 403. The usage source then tries the next token, such as the
+// Claude Code login. The probe keeps the first token, which it can use.
+func TestUsageTriesTheNextTokenOnAScopeError(t *testing.T) {
+	var usageTokens, probeTokens []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if strings.HasSuffix(r.URL.Path, "/api/oauth/usage") {
+			usageTokens = append(usageTokens, token)
+			if token == "narrow" {
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(`{"type":"error","error":{"type":"permission_error",
+					"message":"OAuth token does not meet scope requirement user:profile",
+					"details":{"required_scopes":["user:profile"],"error_code":"oauth_scope_insufficient"}}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"five_hour":{"utilization":35},"seven_day":{"utilization":89}}`))
+			return
+		}
+		probeTokens = append(probeTokens, token)
+		w.Header().Set("anthropic-ratelimit-unified-5h-utilization", "0.35")
+		w.Header().Set("anthropic-ratelimit-unified-7d-utilization", "0.89")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"m","type":"message","role":"assistant","content":[],"model":"x",
+			"stop_reason":"max_tokens","usage":{"input_tokens":23,"output_tokens":0}}`))
+	}))
+	defer srv.Close()
+	t.Setenv("ANTHROPIC_BASE_URL", srv.URL)
+	ctx := context.Background()
+
+	// Both tokens present: the narrow one is refused, the wide one reads.
+	fakeTokens(t, "narrow", "wide")
+	db := memDB(t)
+	r, _, _, err := readUsage(ctx, db, Config{Source: "usage"}, "/c.json", "m")
+	if err != nil || r.Model != usageAPIModel || strings.Join(usageTokens, ",") != "narrow,wide" {
+		t.Fatalf("err=%v model=%q usage tokens=%v", err, r.Model, usageTokens)
+	}
+	if counts, _ := fetchErrorCounts(db, time.Now().Add(-time.Hour)); len(counts) != 0 {
+		t.Fatalf("a read that succeeded recorded an error: %+v", counts)
+	}
+	if _, _, _, err := readUsage(ctx, db, Config{Source: "probe"}, "/c.json", "m"); err != nil || strings.Join(probeTokens, ",") != "narrow" {
+		t.Fatalf("probe: err=%v probe tokens=%v, want the first token only", err, probeTokens)
+	}
+
+	// Only the narrow token: the read fails, and the error leads with the
+	// missing scope and the fix, then names where the token came from.
+	fakeTokens(t, "narrow")
+	db = memDB(t)
+	_, _, _, err = readUsage(ctx, db, Config{Source: "usage"}, "/c.json", "m")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	first, rest, _ := strings.Cut(err.Error(), "\n")
+	if !strings.Contains(first, "user:profile") || !strings.Contains(first, "Log in with claude") || !strings.Contains(rest, "token 1: ") {
+		t.Fatalf("error = %v", err)
+	}
+	if counts, _ := fetchErrorCounts(db, time.Now().Add(-time.Hour)); len(counts) != 1 || counts[0].Status != http.StatusForbidden {
+		t.Fatalf("counts = %+v", counts)
+	}
+	if _, _, _, err := readUsage(ctx, db, Config{Source: "probe"}, "/c.json", "m"); err != nil {
+		t.Fatalf("probe with the narrow token: %v", err)
+	}
+}
+
+// With no token anywhere, a read says where to get one. A source that fails to
+// load, such as an expired login, names itself and does not stop the next one.
+func TestTokensSkipAndName(t *testing.T) {
+	old := tokenSources
+	t.Cleanup(func() { tokenSources = old })
+	tokenSources = []tokenSource{
+		{"empty", func() (string, error) { return "", nil }},
+		{"expired", func() (string, error) { return "", errors.New("has expired") }},
+	}
+	var ts tokens
+	if _, err := ts.use(func(string) error { return nil }, nil); err == nil || !strings.Contains(err.Error(), "expired: has expired") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, where, err := firstToken(); where != "" || err == nil {
+		t.Fatalf("firstToken: where=%q err=%v", where, err)
+	}
+	tokenSources = append(tokenSources, tokenSource{"good", func() (string, error) { return "t", nil }})
+	if tok, where, err := firstToken(); tok != "t" || where != "good" || err != nil {
+		t.Fatalf("firstToken = %q %q %v", tok, where, err)
+	}
+	tokenSources = tokenSources[:1]
+	if _, err := (&tokens{}).use(func(string) error { return nil }, nil); !errors.Is(err, errNoToken) {
+		t.Fatalf("no token: err = %v", err)
+	}
 }
 
 // A usage source with a probe fallback probes on a 429, records the 429, and

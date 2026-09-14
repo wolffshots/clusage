@@ -578,7 +578,7 @@ func (m model) configView() string {
 	b.WriteString(frame(titleStyle.Render("paths"), rows(
 		[2]string{"config file", val(tilde(m.cfgPath))},
 		[2]string{"database", val(tilde(m.dbPath))},
-		[2]string{"token", tokenLabel(m.hasToken)},
+		[2]string{"token", tokenLabel(m.tokenWhere)},
 		[2]string{"version", val(version)},
 	), frameW) + "\n")
 
@@ -621,7 +621,7 @@ func tilde(p string) string {
 	return "~" + p[len(home):]
 }
 
-// tokenLabel reports whether a probe can run at all.
+// sourceLabel reports the configured source, or that it is not set.
 func sourceLabel(s string) string {
 	if !slices.Contains(sources, s) {
 		return warnStyle.Render("not set  (" + strings.Join(sources, ", ") + ")")
@@ -669,9 +669,12 @@ func errorsLabel(counts []errorCount) string {
 	return warnStyle.Render(strings.Join(parts, "  "))
 }
 
-func tokenLabel(has bool) string {
-	if has {
-		return positiveStyle.Render("found")
+// tokenLabel names where the first token comes from, because a narrow token
+// there, such as one from claude setup-token, explains a 403 from the usage
+// endpoint.
+func tokenLabel(where string) string {
+	if where != "" {
+		return positiveStyle.Render("found") + dimStyle.Render("  in "+where)
 	}
 	return warnStyle.Render("not found  (see the README)")
 }

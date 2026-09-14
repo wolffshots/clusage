@@ -208,6 +208,17 @@ Clusage looks for a token in this order:
    `$CLAUDE_CONFIG_DIR` when that is set. After `claude` has logged in, no
    other setup is needed.
 
+Tokens differ in scope. A token from `claude setup-token` can call the API, so
+the `probe` source works with it. It cannot read the usage endpoint, which
+needs the `user:profile` scope that only the Claude Code login carries. When the
+API refuses a token with a 401, or the usage endpoint refuses it for a missing
+scope, clusage tries the next token in the list. So a `clusage` keychain entry
+does not block the `usage` source while a Claude Code login is also present.
+The probe keeps the first token that works.
+
+When no token has the scope, the `usage` error says so and names the fix. The
+Config tab shows where the first token comes from.
+
 Clusage does not refresh the Claude Code login. A login expires after some
 hours without a `claude` run. Run `claude` once to refresh it.
 

@@ -95,17 +95,7 @@ func readUsage(ctx context.Context, db *sql.DB, cfg Config, cfgPath, model strin
 		return Reading{}, tokenUse{}, false, errBadFallback(cfgPath, cfg.Fallback)
 	}
 
-	var token string
-	var tokenErr error
-	tokenRead := false
-	tok := func() (string, error) {
-		if !tokenRead {
-			token, tokenErr = loadToken()
-			tokenRead = true
-		}
-		return token, tokenErr
-	}
-
+	var ts tokens
 	chain := cfg.chain()
 	var errs []error
 	var last error
@@ -119,7 +109,7 @@ func readUsage(ctx context.Context, db *sql.DB, cfg Config, cfgPath, model strin
 				continue
 			}
 		}
-		r, used, fresh, err := readFrom(ctx, db, cfg, src, model, i < len(chain)-1, tok)
+		r, used, fresh, err := readFrom(ctx, db, cfg, src, model, i < len(chain)-1, &ts)
 		if err == nil {
 			r.Fallback = i > 0
 			return r, used, fresh, nil
@@ -134,8 +124,7 @@ func readUsage(ctx context.Context, db *sql.DB, cfg Config, cfgPath, model strin
 	}
 
 	err = errors.Join(errs...)
-	var apiErr *anthropic.Error
-	if errors.As(last, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
+	if unauthorized(last) {
 		// The guard rail hook shows the first line of this error to the agent,
 		// so the cause and the fix lead, and the detail follows.
 		err = fmt.Errorf("the API rejected the OAuth token (401 Unauthorized). Run claude to log in again. If you set CLAUDE_CODE_OAUTH_TOKEN or ran clusage setup, replace that token with a new one from claude setup-token.\n%w", err)
@@ -143,16 +132,36 @@ func readUsage(ctx context.Context, db *sql.DB, cfg Config, cfgPath, model strin
 	return Reading{}, tokenUse{}, false, err
 }
 
+// unauthorized reports a 401, which means the API refused the token itself.
+func unauthorized(err error) bool {
+	var apiErr *anthropic.Error
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized
+}
+
+// scopeInsufficient reports a 403 for a token that lacks a scope. A token from
+// claude setup-token carries user:inference only, so it can probe but cannot
+// read the usage endpoint, which wants user:profile.
+func scopeInsufficient(err error) bool {
+	var apiErr *anthropic.Error
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden &&
+		strings.Contains(apiErr.Error(), "oauth_scope_insufficient")
+}
+
 // readFrom gets one reading from one source. more is true when another source
-// follows in the chain, so a stale status line reading gives way to it.
-func readFrom(ctx context.Context, db *sql.DB, cfg Config, src, model string, more bool, tok func() (string, error)) (Reading, tokenUse, bool, error) {
+// follows in the chain, so a stale status line reading gives way to it. ts
+// hands out the tokens, and a token the API refuses gives way to the next one.
+func readFrom(ctx context.Context, db *sql.DB, cfg Config, src, model string, more bool, ts *tokens) (Reading, tokenUse, bool, error) {
 	switch src {
 	case "usage":
-		token, err := tok()
-		if err != nil {
-			return Reading{}, tokenUse{}, false, err
+		var h map[string]string
+		last, err := ts.use(func(token string) (err error) {
+			h, err = fetchOAuthUsage(ctx, token)
+			return err
+		}, func(err error) bool { return unauthorized(err) || scopeInsufficient(err) })
+		if scopeInsufficient(last) {
+			// The guard rail hook shows the first line, so the fix leads.
+			err = fmt.Errorf("no token has the user:profile scope the usage endpoint needs, and a token from claude setup-token never has it. Log in with claude so clusage can read the Claude Code login, or use the probe source.\n%w", err)
 		}
-		h, err := fetchOAuthUsage(ctx, token)
 		if err != nil {
 			return Reading{}, tokenUse{}, false, err
 		}
@@ -178,16 +187,18 @@ func readFrom(ctx context.Context, db *sql.DB, cfg Config, src, model string, mo
 		return last, tokenUse{}, false, nil
 
 	default: // probe
-		token, err := tok()
+		// Every token can probe, so only a refused token moves on.
+		var h map[string]string
+		var used tokenUse
+		_, err := ts.use(func(token string) (err error) {
+			h, used, err = fetchUsage(ctx, token, model)
+			if err == nil && len(h) == 0 {
+				err = errors.New("no usable anthropic-ratelimit-unified-* headers on the response")
+			}
+			return err
+		}, unauthorized)
 		if err != nil {
 			return Reading{}, tokenUse{}, false, err
-		}
-		h, used, err := fetchUsage(ctx, token, model)
-		switch {
-		case err != nil:
-			return Reading{}, tokenUse{}, false, err
-		case len(h) == 0:
-			return Reading{}, tokenUse{}, false, errors.New("no usable anthropic-ratelimit-unified-* headers on the response")
 		}
 		return Reading{FetchedAt: time.Now(), Model: model, Headers: h}, used, true, nil
 	}

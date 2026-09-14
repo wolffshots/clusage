@@ -129,9 +129,10 @@ type model struct {
 	dbPath string
 	// guard is the guard rail hook's registration, read once at startup.
 	guard guardStatus
-	// hasToken is set by runTUI, because reading it runs the keychain and a
-	// test that builds a model must not.
-	hasToken bool
+	// tokenWhere names where the first token came from, or is empty when there
+	// is none. runTUI sets it, because reading it runs the keychain and a test
+	// that builds a model must not.
+	tokenWhere string
 
 	keys keyMap
 	help help.Model
@@ -585,8 +586,7 @@ func runTUI() error {
 	m := newModel(db, cfg, path, latest, ok)
 	// The keychain read runs once here, not in newModel, so nothing but the
 	// real TUI touches it.
-	_, terr := loadToken()
-	m.hasToken = terr == nil
+	_, m.tokenWhere, _ = firstToken()
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err

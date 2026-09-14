@@ -158,6 +158,13 @@ If it fails:
       Code out. Run claude once, then try again.
   "no token found"
       Log in with claude, or set CLAUDE_CODE_OAUTH_TOKEN.
+  "no token has the user:profile scope the usage endpoint needs"
+      A token from claude setup-token can probe but cannot read the usage
+      endpoint. Log in with claude, and clusage tries that login next. Or
+      use the probe source.
+
+A token that the API refuses, or that lacks the scope the usage endpoint
+needs, gives way to the next token in the list above.
 `,
 
 	"hook": `Usage:
