@@ -132,16 +132,21 @@ func contentWidth(total, reserve int) int {
 // nowView renders one frame per rate limit window, each holding the gauge and
 // the window's status, reset time and burn rate.
 func (m model) nowView(height int) string {
+	frameW := contentWidth(m.width, frameCols) + frameCols
+	// The switch comes first, so clip never drops it and a reading with no
+	// windows still shows it.
+	var b strings.Builder
+	b.WriteString(frame(titleStyle.Render("guard rail"), m.guardSwitch(), frameW) + "\n")
+
 	wins := currentWindows(m)
 	if len(wins) == 0 {
-		return dimStyle.Render("no anthropic-ratelimit-* windows in the last reading")
+		b.WriteString(dimStyle.Render("no anthropic-ratelimit-* windows in the last reading"))
+		return clip(b.String(), height)
 	}
 	now := time.Now()
-	frameW := contentWidth(m.width, frameCols) + frameCols
 	// The gauge row is the bar, a space, and a 4 column percent label.
 	barW := contentWidth(m.width, frameCols+5)
 
-	var b strings.Builder
 	for i, w := range wins {
 		title := valueStyle.Render(w.Name)
 		if i == m.selected {
@@ -172,6 +177,32 @@ func (m model) nowView(height int) string {
 	age := now.Sub(m.latest.FetchedAt).Round(time.Second)
 	b.WriteString(dimStyle.Render("  read " + age.String() + " ago  ·  " + readingSource(m.latest)))
 	return clip(b.String(), height)
+}
+
+// guardSwitch renders the off switch as a solid badge plus a line that names
+// the file and whether it exists, so the state reads at a glance and in words.
+func (m model) guardSwitch() string {
+	badge := lipgloss.NewStyle().Bold(true).Padding(0, 1).Foreground(lipgloss.Color("#FFFFFF"))
+	path := valueStyle.Render(tilde(m.guard.OffPath))
+	var line1, line2 string
+	if m.guard.Off {
+		line1 = badge.Background(negative).Render("GUARD OFF") + "  " +
+			negativeStyle.Render("off switch file EXISTS, every session runs unguarded")
+		line2 = dimStyle.Render("file ") + path + dimStyle.Render("   o deletes it and turns the guard back on")
+	} else {
+		line1 = badge.Background(positive).Render("GUARD ON") + "  " +
+			positiveStyle.Render("no off switch file")
+		line2 = dimStyle.Render("file ") + path + dimStyle.Render(" (absent)   o creates it and turns the guard off")
+	}
+	switch {
+	case m.guardErr != nil:
+		line2 += "\n" + errorStyle.Render("could not flip the switch: ") + m.guardErr.Error()
+	case !m.guard.Registered:
+		line2 += "\n" + warnStyle.Render("hook not registered, so nothing is guarded either way  (clusage hook install)")
+	case m.guard.Disabled && !m.guard.Off:
+		line2 += "\n" + warnStyle.Render("CLUSAGE_GUARD_DISABLE=1 still stands the guard down in this shell")
+	}
+	return line1 + "\n" + line2
 }
 
 // statusDot colours a ● by the window's status: allowed (green), anything

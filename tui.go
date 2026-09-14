@@ -63,8 +63,10 @@ type keyMap struct {
 	Auto    key.Binding
 	Window  key.Binding
 	Span    key.Binding
-	Help    key.Binding
-	Quit    key.Binding
+	// GuardOff creates or removes the guard's off switch file, on the Now tab.
+	GuardOff key.Binding
+	Help     key.Binding
+	Quit     key.Binding
 }
 
 func newKeyMap() keyMap {
@@ -78,6 +80,7 @@ func newKeyMap() keyMap {
 		Auto:        key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "auto-fetch")),
 		Window:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "window")),
 		Span:        key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "span")),
+		GuardOff:    key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "guard on/off")),
 		Help:        key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
@@ -90,7 +93,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Now, k.History, k.Tokens, k.Config, k.Diagnostics},
-		{k.Window, k.Span, k.Refresh, k.Auto},
+		{k.Window, k.Span, k.Refresh, k.Auto, k.GuardOff},
 		{k.Help, k.Quit},
 	}
 }
@@ -141,8 +144,12 @@ type model struct {
 	// dbPath sits beside it, and is derived rather than read, so the config
 	// tab costs no syscall per frame.
 	dbPath string
-	// guard is the guard rail hook's registration, read once at startup.
+	// guard is the guard rail hook's registration and off switch. It is read
+	// at startup, after the o key, and on every error count tick, so a file
+	// touched in a shell shows up too.
 	guard guardStatus
+	// guardErr is the last failure to flip the off switch, shown on the Now tab.
+	guardErr error
 	// tokenWhere names where the first token came from, or is empty when there
 	// is none. runTUI sets it, because reading it runs the keychain and a test
 	// that builds a model must not.
@@ -408,6 +415,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case errorsTickMsg:
+		m.guard = readGuardStatus()
 		return m, tea.Batch(m.errorsCmd(), m.errorsTick(), m.diagRefresh())
 
 	case diagMsg:
@@ -486,6 +494,15 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if n := len(currentWindows(m)); n > 0 {
 			m.selected = (m.selected + 1) % n
 		}
+		return m, nil
+
+	case key.Matches(msg, m.keys.GuardOff):
+		// Only the Now tab shows the switch, so only it flips the file.
+		if m.active != viewNow || !m.hasData {
+			return m, nil
+		}
+		m.guardErr = setGuardOff(m.guard.OffPath, !m.guard.Off)
+		m.guard = readGuardStatus()
 		return m, nil
 
 	case key.Matches(msg, m.keys.Span):

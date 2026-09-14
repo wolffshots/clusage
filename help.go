@@ -190,6 +190,7 @@ Actions:
 Turn it off for a while:
   touch ~/.claude/clusage-guard.off   # guard stands down
   rm ~/.claude/clusage-guard.off      # guard is back
+Or press o on the Now tab of the TUI.
 
 The cuts and timings live under "guard" in config.json. See:
 clusage help guard-config

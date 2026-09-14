@@ -297,6 +297,7 @@ the API. Press `r` for a fresh reading.
 | `a` | Pause or resume both schedules |
 | `tab` | Select the next limit window |
 | `s` | Cycle the history and token span (6h, 24h, 7d, 30d) |
+| `o` | On the Now tab, create or remove the guard's [off switch](#the-off-switch) file |
 | `?` | Toggle the full help |
 | `q` | Quit |
 
@@ -304,6 +305,13 @@ the API. Press `r` for a fresh reading.
 
 **Now** draws a gauge per limit window with its status and reset time. The
 color tracks load: green under 60%, amber under 85%, red at or above 85%.
+
+**Now** opens with a guard rail panel for the off switch. A green `GUARD ON`
+badge means `~/.claude/clusage-guard.off` is absent. A red `GUARD OFF` badge
+means the file exists and every session runs unguarded. Press `o` to create or
+remove the file. The panel reads the file again after each press and every 20
+seconds, so a `touch` or `rm` in a shell shows up too. A warning line appears
+when the hook is not registered, or when `CLUSAGE_GUARD_DISABLE=1` is set.
 
 **Now** also shows `burn 14.2%/h  full in 4h43m` under each gauge. The
 projection targets 100 percent, because the question a usage viewer answers is
@@ -633,6 +641,7 @@ rm ~/.claude/clusage-guard.off       # guard on again
 an environment variable for one session, so a tripped guard would deny every
 tool call, including the calls needed to fix the guard. A file works from
 inside the session. `clusage hook status` reports the switch when it is there.
+The TUI flips it too: press `o` on the Now tab.
 
 Keep `CLUSAGE_GUARD_MAXWAIT` under the hook timeout in `settings.json`. Install
 sets that timeout 15 seconds above the maximum wait. A hook that times out lets

@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // TestGuardNormalize checks the bounds the hook script enforces. A value the
@@ -170,6 +172,42 @@ func TestReadGuardStatus(t *testing.T) {
 	st := readGuardStatus()
 	if !st.Off || !st.Disabled {
 		t.Errorf("the off switch and the disable variable were not seen: %+v", st)
+	}
+}
+
+// TestGuardOffKey checks that o on the Now tab creates the off switch file,
+// that a second press removes it, and that the tab reports what is on disk.
+func TestGuardOffKey(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	off := filepath.Join(dir, "clusage-guard.off")
+	m := testModel("")
+	press := func() {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'o'}})
+		m = next.(model)
+	}
+
+	press()
+	if _, err := os.Stat(off); err != nil || !m.guard.Off {
+		t.Fatalf("o did not create the off switch: err=%v guard=%+v", err, m.guard)
+	}
+	if !strings.Contains(m.nowView(40), "GUARD OFF") {
+		t.Error("the Now tab does not say the guard is off")
+	}
+
+	press()
+	if _, err := os.Stat(off); !os.IsNotExist(err) || m.guard.Off {
+		t.Fatalf("o did not remove the off switch: err=%v guard=%+v", err, m.guard)
+	}
+	if !strings.Contains(m.nowView(40), "GUARD ON") {
+		t.Error("the Now tab does not say the guard is on")
+	}
+
+	// Another tab does not show the switch, so it must not flip the file.
+	m.active = viewConfig
+	press()
+	if _, err := os.Stat(off); !os.IsNotExist(err) {
+		t.Error("o flipped the off switch outside the Now tab")
 	}
 }
 

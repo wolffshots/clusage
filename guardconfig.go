@@ -165,3 +165,19 @@ func readGuardStatus() guardStatus {
 	}
 	return st
 }
+
+// setGuardOff creates the off switch file when off is true and removes it
+// otherwise. The caller reads the status back from disk, so the screen shows
+// what the file system holds, not what was asked for.
+func setGuardOff(path string, off bool) error {
+	if path == "" {
+		return fmt.Errorf("no home directory, so the off switch has no place")
+	}
+	if off {
+		return os.WriteFile(path, nil, 0o644)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
