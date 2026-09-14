@@ -41,6 +41,9 @@ type Config struct {
 	// source whatever Source says. A probe call starts a 5h window. Empty
 	// disables it.
 	ProbeCron string `json:"probe_cron"`
+	// Diagnostics turns on the Diagnostics tab, key 5. clusage doctor prints the
+	// same report whatever this says.
+	Diagnostics bool `json:"diagnostics"`
 	// HistoryHours is how far back the history graphs read. 0 uses the default.
 	HistoryHours int `json:"history_hours"`
 	// Guard holds the guard rail hook's settings.
@@ -274,7 +277,7 @@ type tokenResult struct {
 // nil skip tries every token. Every failure is named by the place its token
 // came from. last is the final failure, so a caller can tell why the last token
 // was refused.
-func (ts *tokens) use(try func(token string) error, retry func(error) bool, skip func(token string) error) (last, err error) {
+func (ts *tokens) use(try func(token, where string) error, retry func(error) bool, skip func(token string) error) (last, err error) {
 	var errs []error
 	for i, src := range tokenSources {
 		if i == len(ts.loaded) {
@@ -295,7 +298,7 @@ func (ts *tokens) use(try func(token string) error, retry func(error) bool, skip
 				continue
 			}
 		}
-		last = try(c.token)
+		last = try(c.token, c.where)
 		if last == nil {
 			return nil, nil
 		}
@@ -314,7 +317,10 @@ func (ts *tokens) use(try func(token string) error, retry func(error) bool, skip
 // user:profile scope. A token's scopes never change, so clusage stops sending it
 // to the usage endpoint. Every such call is a certain 403, and the extra calls
 // earn the token a 429.
-var errNarrowToken = errors.New("skipped: an earlier read found this token lacks the user:profile scope")
+//
+// The message names the way out, because a wrong record would otherwise cost
+// the usage source for good with nothing on screen to undo it.
+var errNarrowToken = errors.New("skipped: an earlier read found this token lacks the user:profile scope. If that is wrong, clear the record with: sqlite3 ~/.config/clusage/clusage.db 'delete from narrow_tokens'")
 
 // tokenFingerprint identifies a token in the database without storing it. The
 // hash of a high-entropy secret cannot be turned back into the secret.
@@ -362,13 +368,9 @@ func firstToken() (token, where string, err error) {
 // claudeCodeToken reads the access token from the .credentials.json file that
 // a Claude Code login writes on Linux and Windows.
 func claudeCodeToken() (string, error) {
-	dir := os.Getenv("CLAUDE_CONFIG_DIR")
-	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		dir = filepath.Join(home, ".claude")
+	dir, err := claudeDir()
+	if err != nil {
+		return "", err
 	}
 	path := filepath.Join(dir, ".credentials.json")
 	raw, err := os.ReadFile(path)
@@ -376,6 +378,19 @@ func claudeCodeToken() (string, error) {
 		return "", err
 	}
 	return claudeCodeLogin(raw, path)
+}
+
+// claudeDir is the Claude Code config directory: CLAUDE_CONFIG_DIR, or
+// ~/.claude.
+func claudeDir() (string, error) {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude"), nil
 }
 
 // claudeCodeLogin takes the access token out of a Claude Code login, which is
@@ -386,23 +401,45 @@ func claudeCodeToken() (string, error) {
 // Claude Code would lose its login. An expired token asks for a claude run,
 // which refreshes it.
 func claudeCodeLogin(raw []byte, where string) (string, error) {
-	var c struct {
-		OAuth struct {
-			AccessToken string `json:"accessToken"`
-			ExpiresAt   int64  `json:"expiresAt"` // unix milliseconds
-		} `json:"claudeAiOauth"`
-	}
-	// The decode error names no content, so the token cannot leak through it.
-	if err := json.Unmarshal(raw, &c); err != nil {
-		return "", fmt.Errorf("parse %s: %w", where, err)
+	l, err := parseClaudeLogin(raw, where)
+	if err != nil {
+		return "", err
 	}
 	switch {
-	case c.OAuth.AccessToken == "":
+	case l.AccessToken == "":
 		return "", fmt.Errorf("no Claude Code login in %s", where)
-	case c.OAuth.ExpiresAt > 0 && time.Now().UnixMilli() >= c.OAuth.ExpiresAt:
+	case l.expired(time.Now()):
 		return "", fmt.Errorf("the login in %s has expired: run claude once to refresh it", where)
 	}
-	return c.OAuth.AccessToken, nil
+	return l.AccessToken, nil
+}
+
+// claudeLogin is the part of a Claude Code login clusage reads. Only
+// AccessToken is a secret. The rest is safe to show on the Diagnostics tab.
+type claudeLogin struct {
+	AccessToken string `json:"accessToken"`
+	// ExpiresAt and RefreshTokenExpiresAt are unix milliseconds, 0 when absent.
+	ExpiresAt             int64    `json:"expiresAt"`
+	RefreshTokenExpiresAt int64    `json:"refreshTokenExpiresAt"`
+	Scopes                []string `json:"scopes"`
+	SubscriptionType      string   `json:"subscriptionType"`
+	RateLimitTier         string   `json:"rateLimitTier"`
+}
+
+// parseClaudeLogin decodes a Claude Code login. The decode error names no
+// content, so the token cannot leak through it.
+func parseClaudeLogin(raw []byte, where string) (claudeLogin, error) {
+	var c struct {
+		OAuth claudeLogin `json:"claudeAiOauth"`
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return claudeLogin{}, fmt.Errorf("parse %s: %w", where, err)
+	}
+	return c.OAuth, nil
+}
+
+func (l claudeLogin) expired(now time.Time) bool {
+	return l.ExpiresAt > 0 && now.UnixMilli() >= l.ExpiresAt
 }
 
 type Reading struct {
@@ -494,6 +531,22 @@ func migrate(db *sql.DB) error {
 		status INTEGER NOT NULL,
 		retry_at TEXT NOT NULL,
 		message TEXT NOT NULL
+	)`)
+	if err != nil {
+		return err
+	}
+	// The last traceKeep HTTP calls to the API, for the Diagnostics tab.
+	// skew_ms is NULL when the response carried no Date header.
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS traces (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		at TEXT NOT NULL,
+		source TEXT NOT NULL,
+		token TEXT NOT NULL,
+		status INTEGER NOT NULL,
+		duration_ms INTEGER NOT NULL,
+		request_id TEXT NOT NULL,
+		skew_ms INTEGER,
+		error TEXT NOT NULL
 	)`)
 	if err != nil {
 		return err

@@ -18,6 +18,7 @@ Commands:
   setup         Store a token in the macOS keychain.
   hook          Install, remove or check the guard rail hook.
   guard-config  Print the guard rail settings the hook reads.
+  doctor        Print a diagnosis of the setup, with suggestions.
   help          Show this help, or the help for one command.
 
 Flags:
@@ -60,6 +61,9 @@ Tabs:
   2 history  percent over time, tab picks the window, s the span
   3 tokens   what clusage spent on its own probe calls
   4 config   the settings in use, the token and the hook status
+  5 diagnostics  suggestions, tokens, calls, errors and build details.
+             Shown only when "diagnostics": true is set in config.json.
+             Scroll it with the arrow keys, pgup, pgdn, home and end.
 
 The dashboard also fetches on the "fetch_cron" schedule in config.json. The
 "probe_cron" schedule sends a probe call whatever the source is, which starts
@@ -209,6 +213,30 @@ Keys, from "guard" in ~/.config/clusage/config.json:
 
 A CLUSAGE_GUARD_* environment variable overrides the file for one session.
 Values out of range fall back to the default.
+`,
+
+	"doctor": `Usage:
+  clusage doctor
+
+Prints what the Diagnostics tab shows, as plain text at full width. Paste it
+into a bug report. It never prints a token, only a fingerprint: the first 16
+hex digits of a SHA-256 of it.
+
+Sections:
+  Suggestions        what to fix, most urgent first
+  Setup              the source chain, 429 waits, last readings, status line,
+                     guard hook and schedules
+  Tokens             every place a token can live, its expiry and scopes, and
+                     which token the usage and probe sources send
+  Calls              the last good and failed call per source, latency, and
+                     the most recent calls with their request-id
+  Errors             failed reads of the last 24 hours
+  Latest reading     windows in local time, UTC and epoch, the stored headers,
+                     and the clock skew against the API
+  Account and build  subscription, rate limit tier, version and commit
+  Database and guard table sizes and the guard rail hook's last check
+
+It reads the keychain, so macOS can ask to allow it once.
 `,
 
 	"help": `Usage:

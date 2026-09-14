@@ -77,12 +77,14 @@ func probe(ctx context.Context, client anthropic.Client, model string, maxTokens
 // the fetch timeout, so the context expires and the response, headers and all,
 // is thrown away. One attempt keeps the rejected response, which carries the
 // numbers this tool exists to show.
-func fetchUsage(ctx context.Context, token, model string) (map[string]string, tokenUse, error) {
-	client := anthropic.NewClient(
+//
+// opts go on the client after the fixed options, for traced.
+func fetchUsage(ctx context.Context, token, model string, opts ...option.RequestOption) (map[string]string, tokenUse, error) {
+	client := anthropic.NewClient(append([]option.RequestOption{
 		option.WithAuthToken(token),
 		option.WithHeader("anthropic-beta", "oauth-2025-04-20"),
 		option.WithMaxRetries(0),
-	)
+	}, opts...)...)
 	// Zero max tokens, not one. The API runs prefill, returns an empty content
 	// block with the headers intact, and bills no output token. Output costs
 	// five times what input does, so the discarded one-token reply carried

@@ -31,6 +31,12 @@ The `usage` source reads every window, including Opus-only and overage, makes
 no inference call, and works with no Claude Code session open. The endpoint is
 undocumented and often answers 429, so clusage never retries it.
 
+The `usage` source needs a current Claude Code login. A login lasts a few
+hours, and only a `claude` run refreshes it. The Claude desktop app does not
+refresh the login that clusage reads. If you use Claude Code in the desktop app
+only, expect `auto` to fall back to the probe, which costs an inference call
+per reading and has no Opus-only or Sonnet-only windows.
+
 The `probe` source also reads every window and needs no session, but each
 reading costs one small inference call.
 
@@ -165,7 +171,36 @@ Point the Claude Code status line at clusage in `~/.claude/settings.json`:
 Then set `"source": "statusline"` in `config.json`. No token is needed.
 
 The command prints `5h 23% · 7d 41%` and stores a reading only when the numbers
-change. It replaces any status line you already have.
+change.
+
+#### Keep an existing status line
+
+`statusLine` takes one command, so `clusage statusline` replaces a status line
+you already have. To keep both, point `statusLine` at a wrapper script. The
+script hands the same session JSON to both commands and prints both results:
+
+```sh
+#!/bin/sh
+# ~/.claude/statusline.sh
+input=$(cat)
+mine=$(printf '%s' "$input" | your-existing-status-line-command)
+limits=$(printf '%s' "$input" | clusage statusline)
+printf '%s  %s\n' "$mine" "$limits"
+```
+
+```sh
+chmod +x ~/.claude/statusline.sh
+```
+
+```json
+{
+  "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" }
+}
+```
+
+Replace `your-existing-status-line-command` with the command `statusLine` ran
+before. The Diagnostics tab and `clusage doctor` recognize a script that runs
+`clusage statusline`, and report the status line as set up.
 
 A session updates its numbers only when it gets an API response. An idle session
 repeats its last numbers, and clusage does not store the repeats. The age of the
@@ -223,6 +258,14 @@ earn the token a 429. A 429 does not move on to the next token. It ends the
 read, and the `usage` source waits it out, because a request sent again with
 another token would work around the rate limit.
 
+The records live in the `narrow_tokens` table and never expire. A new token
+hashes differently, so it gets tried. If a record is ever wrong, clear every
+record with this command, and the next usage read tries each token again:
+
+```sh
+sqlite3 ~/.config/clusage/clusage.db 'delete from narrow_tokens'
+```
+
 When no token has the scope, the `usage` error says so and names the fix. The
 Config tab shows where the first token comes from.
 
@@ -235,6 +278,7 @@ hours without a `claude` run. Run `claude` once to refresh it.
 clusage             # open the TUI
 clusage tui         # the same thing, named explicitly
 clusage usage       # print one line per window and exit
+clusage doctor      # print a diagnosis of the setup, with suggestions
 clusage help        # overview; clusage help <command> for one command
 clusage --version   # print the version and exit
 ```
@@ -247,6 +291,8 @@ the API. Press `r` for a fresh reading.
 | Key | Action |
 |---|---|
 | `1` `2` `3` `4` | Now, History, Tokens, Config tab |
+| `5` | Diagnostics tab, when `"diagnostics": true` is set |
+| `↑` `↓` `pgup` `pgdn` `home` `end` | Scroll the Diagnostics tab |
 | `r` | Fetch a reading now |
 | `a` | Pause or resume both schedules |
 | `tab` | Select the next limit window |
@@ -308,6 +354,31 @@ counts appear.
 by source and status, whether each schedule parses, and when it next fires. It also reports the guard rail thresholds the
 hook would apply, and marks a row an environment variable overrode. Last come
 the config and database paths, whether a token is stored, and the version.
+
+**Diagnostics** only shows when `"diagnostics": true` is set in `config.json`.
+It is taller than a terminal, so it scrolls. `clusage doctor` prints the same
+report as plain text at full width, whatever the setting says. Paste that into
+a bug report. It holds these sections:
+
+| Section | What it shows |
+|---|---|
+| Suggestions | What to fix, most urgent first. For example an expired login, a login recorded as narrow, a 429 wait, a status line that is not set up, or a clock that is off. |
+| Setup | The source chain, any 429 wait, when each source last gave a reading, the status line and guard hook setup, and both schedules. |
+| Tokens | Every place a token can live, its expiry and scopes, and which token the usage and probe sources send first. |
+| Calls | The last good and the last failed call per source, the latency, and the most recent calls with their `request-id`. |
+| Errors | The failed reads of the last 24 hours. |
+| Latest reading | The windows in local time, UTC and epoch, the stored headers, and the clock skew against the API. |
+| Account and build | The subscription and rate limit tier from the login, the version, the Go version and the commit. |
+| Database and guard | The database size and rows per table, and the last check the guard rail hook recorded. |
+
+No part of the report holds a token. A token shows as a fingerprint, which is
+the first 16 hex digits of a SHA-256 of the token. The fingerprint tells two
+tokens apart, and nobody can get the token back from it.
+
+Clusage records every call to the usage endpoint and the probe in the `traces`
+table: the time, the token source, the status, the duration and the
+`request-id`. The table keeps the last 200 calls. The Diagnostics tab reads the
+keychain, so it reloads only while it is open.
 
 ### One-shot output
 
@@ -614,6 +685,7 @@ starts empty on purpose, so pick one before the first reading:
   "threshold_minutes": 5,
   "fetch_cron": "*/15 * * * *",
   "probe_cron": "",
+  "diagnostics": false,
   "history_hours": 168,
   "guard": {
     "soft_5h_percent": 90,
@@ -640,6 +712,7 @@ starts empty on purpose, so pick one before the first reading:
 | `threshold_minutes` | How long `clusage usage` reuses a cached reading. |
 | `fetch_cron` | Schedule for the automatic fetch. Empty disables it. |
 | `probe_cron` | Schedule for a probe call, whatever `source` is. Empty disables it. |
+| `diagnostics` | Show the Diagnostics tab on key `5`. See [Tabs](#tabs). |
 | `history_hours` | How far back the history graphs may read. |
 | `guard` | The guard rail hook's thresholds. See [Guard rail settings](#guard-rail-settings). |
 

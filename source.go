@@ -154,8 +154,8 @@ func readFrom(ctx context.Context, db *sql.DB, cfg Config, src, model string, mo
 	switch src {
 	case "usage":
 		var h map[string]string
-		last, err := ts.use(func(token string) (err error) {
-			h, err = fetchOAuthUsage(ctx, token)
+		last, err := ts.use(func(token, where string) (err error) {
+			h, err = fetchOAuthUsage(ctx, token, traced(db, src, where))
 			if scopeInsufficient(err) {
 				// A failed write only costs one more certain 403 next read.
 				_ = markNarrow(db, token, time.Now())
@@ -200,8 +200,8 @@ func readFrom(ctx context.Context, db *sql.DB, cfg Config, src, model string, mo
 		// Every token can probe, so only a refused token moves on.
 		var h map[string]string
 		var used tokenUse
-		_, err := ts.use(func(token string) (err error) {
-			h, used, err = fetchUsage(ctx, token, model)
+		_, err := ts.use(func(token, where string) (err error) {
+			h, used, err = fetchUsage(ctx, token, model, traced(db, src, where))
 			if err == nil && len(h) == 0 {
 				err = errors.New("no usable anthropic-ratelimit-unified-* headers on the response")
 			}
@@ -220,12 +220,14 @@ func readFrom(ctx context.Context, db *sql.DB, cfg Config, src, model string, mo
 //
 // Retries are off for the same reason as fetchUsage: the endpoint answers 429
 // often, and in auto a refusal should move on to the next source at once.
-func fetchOAuthUsage(ctx context.Context, token string) (map[string]string, error) {
-	client := anthropic.NewClient(
+//
+// opts go on the client after the fixed options, for traced.
+func fetchOAuthUsage(ctx context.Context, token string, opts ...option.RequestOption) (map[string]string, error) {
+	client := anthropic.NewClient(append([]option.RequestOption{
 		option.WithAuthToken(token),
 		option.WithHeader("anthropic-beta", "oauth-2025-04-20"),
 		option.WithMaxRetries(0),
-	)
+	}, opts...)...)
 	var body json.RawMessage
 	if err := client.Get(ctx, "api/oauth/usage", nil, &body); err != nil {
 		return nil, err

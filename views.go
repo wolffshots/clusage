@@ -721,3 +721,49 @@ func clip(s string, height int) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// ---- Diagnostics tab -------------------------------------------------------
+
+// diagnosticsLines renders the whole Diagnostics tab, one frame per section.
+// It is taller than a terminal, so diagnosticsView shows a window onto it.
+func (m model) diagnosticsLines() []string {
+	if m.diag == nil {
+		return []string{dimStyle.Render("reading the setup…")}
+	}
+	frameW := contentWidth(m.width, frameCols) + frameCols
+	const label = 7 // "error  "
+	wrap := lipgloss.NewStyle().Width(max(frameW-frameCols-label, 20))
+
+	var sugs []string
+	for _, s := range m.diag.Suggestions {
+		style := dimStyle
+		switch s.Level {
+		case sugError:
+			style = errorStyle
+		case sugWarn:
+			style = warnStyle
+		}
+		for i, line := range strings.Split(wrap.Render(s.Text), "\n") {
+			lead := strings.Repeat(" ", label)
+			if i == 0 {
+				lead = style.Render(suggestionLabels[s.Level]) + "  "
+			}
+			sugs = append(sugs, lead+line)
+		}
+	}
+	parts := []string{frame(titleStyle.Render("Suggestions"), strings.Join(sugs, "\n"), frameW)}
+	for _, sec := range m.diag.Sections {
+		parts = append(parts, frame(titleStyle.Render(sec.Title), strings.Join(sec.Lines, "\n"), frameW))
+	}
+	parts = append(parts, dimStyle.Render("  read "+ageLabel(time.Since(m.diag.At))+
+		" ago  ·  ↑↓ pgup pgdn home end scroll  ·  clusage doctor prints the full width"))
+	return strings.Split(strings.Join(parts, "\n"), "\n")
+}
+
+// diagnosticsView shows the part of the Diagnostics tab the scroll offset
+// selects, clamped so a resize never scrolls past the end.
+func (m model) diagnosticsView(height int) string {
+	lines := m.diagnosticsLines()
+	off := min(max(m.diagOffset, 0), max(len(lines)-height, 0))
+	return strings.Join(lines[off:min(len(lines), off+height)], "\n")
+}

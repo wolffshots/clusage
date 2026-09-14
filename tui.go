@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,9 +22,18 @@ const (
 	viewHistory
 	viewTokens
 	viewConfig
+	viewDiagnostics
 )
 
 var tabNames = []string{"Now", "History", "Tokens", "Config"}
+
+// tabs is tabNames plus the Diagnostics tab when config.json turns it on.
+func (m model) tabs() []string {
+	if m.cfg.Diagnostics {
+		return append(slices.Clone(tabNames), "Diagnostics")
+	}
+	return tabNames
+}
 
 // cronCheckInterval is how often the model asks whether the schedule selects
 // the current minute. tea.Tick does not align to the clock, so a whole-minute
@@ -46,6 +56,8 @@ type keyMap struct {
 	History key.Binding
 	Tokens  key.Binding
 	Config  key.Binding
+	// Diagnostics is enabled only when config.json turns the tab on.
+	Diagnostics key.Binding
 
 	Refresh key.Binding
 	Auto    key.Binding
@@ -57,16 +69,17 @@ type keyMap struct {
 
 func newKeyMap() keyMap {
 	return keyMap{
-		Now:     key.NewBinding(key.WithKeys("1"), key.WithHelp("1", "now")),
-		History: key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "history")),
-		Tokens:  key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "tokens")),
-		Config:  key.NewBinding(key.WithKeys("4"), key.WithHelp("4", "config")),
-		Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "fetch now")),
-		Auto:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "auto-fetch")),
-		Window:  key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "window")),
-		Span:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "span")),
-		Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Now:         key.NewBinding(key.WithKeys("1"), key.WithHelp("1", "now")),
+		History:     key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "history")),
+		Tokens:      key.NewBinding(key.WithKeys("3"), key.WithHelp("3", "tokens")),
+		Config:      key.NewBinding(key.WithKeys("4"), key.WithHelp("4", "config")),
+		Diagnostics: key.NewBinding(key.WithKeys("5"), key.WithHelp("5", "diagnostics")),
+		Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "fetch now")),
+		Auto:        key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "auto-fetch")),
+		Window:      key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "window")),
+		Span:        key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "span")),
+		Help:        key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
@@ -76,7 +89,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.Now, k.History, k.Tokens, k.Config},
+		{k.Now, k.History, k.Tokens, k.Config, k.Diagnostics},
 		{k.Window, k.Span, k.Refresh, k.Auto},
 		{k.Help, k.Quit},
 	}
@@ -105,6 +118,7 @@ type fetchErrMsg struct {
 type historyMsg struct{ readings []Reading }
 type errorsMsg struct{ counts []errorCount }
 type errorsTickMsg struct{}
+type diagMsg struct{ d diagnosis }
 type tokensMsg struct {
 	samples []TokenSample
 	total   tokenUse
@@ -167,6 +181,11 @@ type model struct {
 	// the database, the guard rail hook's included.
 	errCounts []errorCount
 
+	// diag is the last diagnosis, nil until the Diagnostics tab first loads.
+	// diagOffset is how far that tab is scrolled, in lines.
+	diag       *diagnosis
+	diagOffset int
+
 	width, height int
 }
 
@@ -177,6 +196,7 @@ func newModel(db *sql.DB, cfg Config, cfgPath string, latest Reading, hasData bo
 
 	km := newKeyMap()
 	scheduled := cronValid(cfg.FetchCron) || cronValid(cfg.ProbeCron)
+	km.Diagnostics.SetEnabled(cfg.Diagnostics)
 	if !scheduled {
 		// Nothing to toggle without a schedule; keep a to itself out of the help
 		// rather than advertise a no-op.
@@ -293,6 +313,22 @@ func (m model) errorsTick() tea.Cmd {
 	return tea.Tick(errorsCheckInterval, func(time.Time) tea.Msg { return errorsTickMsg{} })
 }
 
+// diagCmd reads the whole setup off the UI goroutine. It runs the keychain, so
+// it only runs while the Diagnostics tab is open.
+func (m model) diagCmd() tea.Cmd {
+	db, cfg, path := m.db, m.cfg, m.cfgPath
+	return func() tea.Msg { return diagMsg{d: diagnose(db, cfg, path, time.Now())} }
+}
+
+// diagRefresh reloads the diagnosis when its tab is open, and does nothing
+// otherwise.
+func (m model) diagRefresh() tea.Cmd {
+	if m.active != viewDiagnostics {
+		return nil
+	}
+	return m.diagCmd()
+}
+
 // probeConfig is the config a probe_cron fetch runs with: the probe source and
 // no fallback, whatever config.json says.
 func (m model) probeConfig() Config {
@@ -347,7 +383,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.latest, m.hasData = msg.r, true
-		return m, tea.Batch(m.historyCmd(), m.tokensCmd(), m.errorsCmd(), m.pendingProbe())
+		return m, tea.Batch(m.historyCmd(), m.tokensCmd(), m.errorsCmd(), m.pendingProbe(), m.diagRefresh())
 
 	case fetchErrMsg:
 		m.fetching = false
@@ -355,10 +391,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Keep the last good reading on screen and flag the failure on the
 			// tab bar; a scheduled fetch failing must not hide the numbers.
 			m.lastAuto = "auto " + time.Now().Local().Format("15:04") + " ✗"
-			return m, tea.Batch(m.errorsCmd(), m.pendingProbe())
+			return m, tea.Batch(m.errorsCmd(), m.pendingProbe(), m.diagRefresh())
 		}
 		m.err = msg.err
-		return m, tea.Batch(m.errorsCmd(), m.pendingProbe())
+		return m, tea.Batch(m.errorsCmd(), m.pendingProbe(), m.diagRefresh())
 
 	case historyMsg:
 		m.history = msg.readings
@@ -372,7 +408,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case errorsTickMsg:
-		return m, tea.Batch(m.errorsCmd(), m.errorsTick())
+		return m, tea.Batch(m.errorsCmd(), m.errorsTick(), m.diagRefresh())
+
+	case diagMsg:
+		m.diag = &msg.d
+		return m, nil
 
 	case tokensMsg:
 		m.tokens, m.tokenTotal, m.tokenCalls = msg.samples, msg.total, msg.calls
@@ -464,6 +504,29 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keys.Config):
 		m.active = viewConfig
 		return m, nil
+	case key.Matches(msg, m.keys.Diagnostics):
+		m.active = viewDiagnostics
+		return m, m.diagCmd()
+	}
+	if m.active == viewDiagnostics {
+		// The tab is taller than a terminal, so it scrolls. diagnosticsView
+		// clamps the offset against the content it renders.
+		page := max(m.bodyHeight()-1, 1)
+		switch msg.String() {
+		case "up", "k":
+			m.diagOffset--
+		case "down", "j":
+			m.diagOffset++
+		case "pgup", "b":
+			m.diagOffset -= page
+		case "pgdown", " ", "f":
+			m.diagOffset += page
+		case "home", "g":
+			m.diagOffset = 0
+		case "end", "G":
+			m.diagOffset = len(m.diagnosticsLines())
+		}
+		m.diagOffset = min(max(m.diagOffset, 0), max(len(m.diagnosticsLines())-m.bodyHeight(), 0))
 	}
 	return m, nil
 }
@@ -472,28 +535,14 @@ func (m model) View() string {
 	if m.width == 0 {
 		return "loading…"
 	}
-	top := m.renderTabs()
-	bottom := footerStyle.Width(m.width).Render(m.help.View(m.keys))
-
-	// A failure is a banner above the tab, not a replacement for it. The last
-	// good reading is the reason to keep the tabs reachable while the API is
-	// refusing calls.
-	banner := ""
-	if m.err != nil {
-		banner = lipgloss.NewStyle().Width(m.width).Render(
-			errorStyle.Render("fetch failed: ") + m.err.Error())
-	}
-
-	bodyH := m.height - lipgloss.Height(top) - lipgloss.Height(bottom) - 1
-	if banner != "" {
-		bodyH -= lipgloss.Height(banner) + 1
-	}
-	if bodyH < 3 {
-		bodyH = 3
-	}
+	top, banner, bottom, bodyH := m.chrome()
 
 	var body string
 	switch {
+	case m.active == viewDiagnostics:
+		// Diagnostics matter most when there is no reading, so the tab does not
+		// wait for one.
+		body = m.diagnosticsView(bodyH)
 	case !m.hasData && m.err != nil:
 		body = dimStyle.Render("press r to retry")
 	case !m.hasData && m.fetching:
@@ -521,9 +570,33 @@ func (m model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
+// chrome renders the parts around the body, and the height left for the body.
+// A failure is a banner above the tab, not a replacement for it. The last good
+// reading is the reason to keep the tabs reachable while the API is refusing
+// calls.
+func (m model) chrome() (top, banner, bottom string, bodyH int) {
+	top = m.renderTabs()
+	bottom = footerStyle.Width(m.width).Render(m.help.View(m.keys))
+	if m.err != nil {
+		banner = lipgloss.NewStyle().Width(m.width).Render(
+			errorStyle.Render("fetch failed: ") + m.err.Error())
+	}
+	bodyH = m.height - lipgloss.Height(top) - lipgloss.Height(bottom) - 1
+	if banner != "" {
+		bodyH -= lipgloss.Height(banner) + 1
+	}
+	return top, banner, bottom, max(bodyH, 3)
+}
+
+// bodyHeight is the height left for the body.
+func (m model) bodyHeight() int {
+	_, _, _, h := m.chrome()
+	return h
+}
+
 func (m model) renderTabs() string {
 	var tabs []string
-	for i, name := range tabNames {
+	for i, name := range m.tabs() {
 		if viewID(i) == m.active {
 			tabs = append(tabs, tabActiveStyle.Render(name))
 		} else {

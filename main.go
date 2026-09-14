@@ -61,6 +61,8 @@ func run(args []string) error {
 		return guardConfig()
 	case "statusline":
 		return statusline()
+	case "doctor":
+		return doctor()
 	case "tui":
 		return runTUI()
 	default:

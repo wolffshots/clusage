@@ -355,7 +355,7 @@ func TestTokensSkipAndName(t *testing.T) {
 		{"expired", func() (string, error) { return "", errors.New("has expired") }},
 	}
 	var ts tokens
-	if _, err := ts.use(func(string) error { return nil }, nil, nil); err == nil || !strings.Contains(err.Error(), "expired: has expired") {
+	if _, err := ts.use(func(string, string) error { return nil }, nil, nil); err == nil || !strings.Contains(err.Error(), "expired: has expired") {
 		t.Fatalf("err = %v", err)
 	}
 	if _, where, err := firstToken(); where != "" || err == nil {
@@ -366,7 +366,7 @@ func TestTokensSkipAndName(t *testing.T) {
 		t.Fatalf("firstToken = %q %q %v", tok, where, err)
 	}
 	tokenSources = tokenSources[:1]
-	if _, err := (&tokens{}).use(func(string) error { return nil }, nil, nil); !errors.Is(err, errNoToken) {
+	if _, err := (&tokens{}).use(func(string, string) error { return nil }, nil, nil); !errors.Is(err, errNoToken) {
 		t.Fatalf("no token: err = %v", err)
 	}
 }
