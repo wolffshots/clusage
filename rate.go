@@ -15,11 +15,16 @@ const tauDivisor = 8
 // rollover rather than as accounting noise. It is a 0..1 fraction, so 0.02 is
 // two whole percent.
 //
-// A changed reset header looks like a better signal, and the design doc names
-// it. It is not used, because a reset that rolls forward on every reading
-// would make every pair a new segment, and the rate would never seed. A fall
-// this large catches every real rollover.
+// The reset header is the better signal and segmentBreak prefers it. This
+// magnitude test stays for the windows that carry no reset header, and for a
+// fall too large to be anything but a new window.
 const resetDrop = 0.02
+
+// resetJitter is how far a reset header may move without meaning a rollover.
+// The header rounds to the second, so the same reset reads one second apart
+// across readings. A real rollover moves it forward by a whole window, which
+// is hours at least.
+const resetJitter = time.Minute
 
 // staleTaus is how many smoothing horizons may pass after the newest reading
 // before burnRate refuses to report.
@@ -71,15 +76,40 @@ func tauFor(name string) time.Duration {
 	return length / tauDivisor
 }
 
-// ratePoint is one reading reduced to what a rate needs. The reset header is
-// not carried, because resetDrop finds a rollover from the utilization alone.
+// ratePoint is one reading reduced to what a rate needs. The source names
+// which reader took it, because two readers lag each other and a fall between
+// them means a stale snapshot rather than real movement.
 type ratePoint struct {
-	at   time.Time
-	frac float64
+	at     time.Time
+	frac   float64
+	source string
+	reset  time.Time // zero for a window that carries no reset header
+}
+
+// rolledOver reports whether the window reset between two points. It answers
+// false when either point carries no reset header.
+func rolledOver(prev, cur ratePoint) bool {
+	if prev.reset.IsZero() || cur.reset.IsZero() {
+		return false
+	}
+	return cur.reset.After(prev.reset.Add(resetJitter))
+}
+
+// segmentBreak reports whether a rate may not be measured from prev to cur.
+// The reset header is the plain answer where both points carry one. The
+// magnitude test covers the windows that carry no reset header, and a fall too
+// large to be anything but a new window.
+func segmentBreak(prev, cur ratePoint) bool {
+	return rolledOver(prev, cur) || cur.frac < prev.frac-resetDrop
 }
 
 // ratePoints pulls one window out of every reading, oldest first. A reading
 // that carries no usable utilization for that window contributes no point.
+//
+// A reading also contributes no point when it is stale. Readers lag each
+// other, so a reading that sits below one already taken by another reader
+// describes an older state, and the series already holds a better answer for
+// that moment. Only a reader falling below itself is real movement.
 func ratePoints(readings []Reading, name string) []ratePoint {
 	var out []ratePoint
 	for _, r := range readings {
@@ -87,9 +117,24 @@ func ratePoints(readings []Reading, name string) []ratePoint {
 			if w.Name != name {
 				continue
 			}
-			if f, ok := w.utilFrac(); ok {
-				out = append(out, ratePoint{at: r.FetchedAt, frac: f})
+			f, ok := w.utilFrac()
+			if !ok {
+				break
 			}
+			// Model names the reader: the usage API, the status line, or the
+			// model a probe called. readingSource is not used, because it
+			// adds a fallback suffix that would split one reader in two.
+			p := ratePoint{at: r.FetchedAt, frac: f, source: r.Model}
+			if t, ok := w.resetTime(); ok {
+				p.reset = t
+			}
+			if n := len(out); n > 0 {
+				prev := out[n-1]
+				if p.frac < prev.frac && p.source != prev.source && !rolledOver(prev, p) {
+					break // a stale snapshot from a reader that lags
+				}
+			}
+			out = append(out, p)
 			break
 		}
 	}
@@ -111,7 +156,7 @@ func rateWalk(pts []ratePoint, tau time.Duration) ([]float64, []bool) {
 	minSpan := tau / minSpanDivisor
 	start := 0 // the first point of the current segment
 	for i := 1; i < len(pts); i++ {
-		if pts[i].frac < pts[i-1].frac-resetDrop {
+		if segmentBreak(pts[i-1], pts[i]) {
 			// The window rolled over. Start a new segment rather than measure
 			// across the fall.
 			start = i

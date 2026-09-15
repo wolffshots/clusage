@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -315,5 +316,123 @@ func TestRateWalkWidensTheSpanWhenReadingsAreSparse(t *testing.T) {
 	// One point over 73 minutes is about 0.8 percent per hour.
 	if got := vals[2]; got < 0.5 || got > 1.1 {
 		t.Fatalf("want about 0.8%%/h, got %v", got)
+	}
+}
+
+// reading builds one reading for a window, with a source and a reset header.
+func reading(name, source string, at time.Time, frac float64, reset time.Time) Reading {
+	h := map[string]string{
+		"anthropic-ratelimit-unified-" + name + "-utilization": ftoa(frac),
+		"anthropic-ratelimit-unified-" + name + "-status":      "allowed",
+	}
+	if !reset.IsZero() {
+		h["anthropic-ratelimit-unified-"+name+"-reset"] = strconv.FormatInt(reset.Unix(), 10)
+	}
+	return Reading{FetchedAt: at, Model: source, Headers: h}
+}
+
+func TestRatePointsDropsAStaleReadingFromAnotherSource(t *testing.T) {
+	// The real case. usage-api reported 0.09, then statusline reported 0.05
+	// two minutes later with the same reset. The statusline reading describes
+	// an older state, so it must contribute no point.
+	base := time.Date(2026, 9, 15, 8, 26, 0, 0, time.UTC)
+	reset := time.Date(2026, 9, 21, 16, 0, 0, 0, time.UTC)
+	got := ratePoints([]Reading{
+		reading("7d", "usage-api", base, 0.09, reset),
+		reading("7d", "statusline", base.Add(2*time.Minute), 0.05, reset),
+		reading("7d", "usage-api", base.Add(4*time.Minute), 0.09, reset),
+	}, "7d")
+	if len(got) != 2 {
+		t.Fatalf("want the stale reading dropped, got %d points: %+v", len(got), got)
+	}
+	for _, p := range got {
+		if p.frac != 0.09 {
+			t.Fatalf("want only the 0.09 readings, got %v", p.frac)
+		}
+	}
+}
+
+func TestRatePointsKeepsAFallFromTheSameSource(t *testing.T) {
+	// One source falling is real data, not a stale snapshot. The 7d window
+	// fell from 0.11 to 0.0 over twelve idle hours with no reset.
+	base := time.Date(2026, 9, 1, 14, 30, 0, 0, time.UTC)
+	reset := time.Date(2026, 9, 7, 16, 0, 0, 0, time.UTC)
+	got := ratePoints([]Reading{
+		reading("7d", "usage-api", base, 0.11, reset),
+		reading("7d", "usage-api", base.Add(12*time.Hour), 0.0, reset),
+	}, "7d")
+	if len(got) != 2 {
+		t.Fatalf("want both points kept, got %d", len(got))
+	}
+}
+
+func TestRatePointsKeepsARolloverFromAnotherSource(t *testing.T) {
+	// A fall across a reset is a rollover, not a stale snapshot, even when the
+	// source changes at the same time.
+	base := time.Date(2026, 9, 15, 17, 29, 0, 0, time.UTC)
+	before := time.Date(2026, 9, 15, 17, 30, 0, 0, time.UTC)
+	got := ratePoints([]Reading{
+		reading("5h", "usage-api", base, 0.98, before),
+		reading("5h", "statusline", base.Add(2*time.Minute), 0.01, before.Add(5*time.Hour)),
+	}, "5h")
+	if len(got) != 2 {
+		t.Fatalf("want the rollover kept, got %d points", len(got))
+	}
+}
+
+func TestRateWalkBreaksWhenTheResetHeaderAdvances(t *testing.T) {
+	// The second real case. The 5h window reset after light use, so the fall
+	// was only 0.02 and the magnitude test missed it. The rate then measured
+	// across the rollover and read as negative.
+	base := time.Date(2026, 9, 4, 8, 0, 0, 0, time.UTC)
+	reset := time.Date(2026, 9, 4, 9, 10, 0, 0, time.UTC)
+	var rs []Reading
+	// Four readings climbing to 0.04 before the reset.
+	for i := 0; i < 4; i++ {
+		rs = append(rs, reading("5h", "usage-api",
+			base.Add(time.Duration(i)*20*time.Minute), 0.01*float64(i+1), reset))
+	}
+	// After the reset the header advances a whole window and use starts again.
+	after := reset.Add(5 * time.Hour)
+	for i := 0; i < 4; i++ {
+		rs = append(rs, reading("5h", "usage-api",
+			reset.Add(time.Duration(i+1)*20*time.Minute), 0.02+0.03*float64(i), after))
+	}
+	pts := ratePoints(rs, "5h")
+	if len(pts) != 8 {
+		t.Fatalf("want 8 points, got %d", len(pts))
+	}
+	vals, ok := rateWalk(pts, tauFor("5h"))
+	if ok[4] {
+		t.Fatalf("the point after the reset must open a new segment, got %v", vals[4])
+	}
+	last := len(pts) - 1
+	if !ok[last] {
+		t.Fatal("want a rate inside the new segment")
+	}
+	// 3 points per 20 minutes is 9 percent per hour, measured within the
+	// segment only. Reaching across the reset would read negative.
+	if got := vals[last]; got < 8 || got > 10 {
+		t.Fatalf("want about 9%%/h after the reset, got %v", got)
+	}
+}
+
+func TestRateWalkStillBreaksWithNoResetHeader(t *testing.T) {
+	// 7d-sonnet, 7d-opus and overage carry no reset header. The magnitude test
+	// must still find a rollover for them.
+	base := time.Date(2026, 9, 15, 9, 0, 0, 0, time.UTC)
+	var rs []Reading
+	for i := 0; i < 4; i++ {
+		rs = append(rs, reading("overage", "usage-api",
+			base.Add(time.Duration(i)*20*time.Minute), 0.6+0.06*float64(i), time.Time{}))
+	}
+	for i := 0; i < 4; i++ {
+		rs = append(rs, reading("overage", "usage-api",
+			base.Add(time.Duration(i+4)*20*time.Minute), 0.02+0.03*float64(i), time.Time{}))
+	}
+	pts := ratePoints(rs, "overage")
+	vals, ok := rateWalk(pts, tauFor("overage"))
+	if ok[4] {
+		t.Fatalf("a fall with no reset header must open a new segment, got %v", vals[4])
 	}
 }
