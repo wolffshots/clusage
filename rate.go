@@ -25,6 +25,13 @@ const resetDrop = 0.02
 // before burnRate refuses to report.
 const staleTaus = 4
 
+// minSpanDivisor sets the shortest span a rate may be measured over, as a
+// fraction of the horizon. The utilization header carries two decimals, so one
+// step is a whole percent. Measured over seconds that one step reads as
+// hundreds of percent per hour. A span this long keeps the step small against
+// the real movement.
+const minSpanDivisor = 4
+
 // defaultWindowLength is assumed for a window whose name carries no length,
 // such as "overage".
 const defaultWindowLength = 5 * time.Hour
@@ -89,45 +96,55 @@ func ratePoints(readings []Reading, name string) []ratePoint {
 	return out
 }
 
-// rateWalk replays a time-decayed average over pts. It returns the rate at
-// every point, oldest first, and whether that point carries a usable rate.
-// Both slices are the same length as pts, and index 0 is never usable because
-// one point carries no rate.
+// rateWalk measures a rate at every point over a trailing span. It returns the
+// rate at every point, oldest first, and whether that point carries a usable
+// rate. Both slices are the same length as pts, and index 0 is never usable
+// because one point carries no rate.
 //
-// The decay uses elapsed time rather than sample count, so a 30 second probe
-// pair and a 15 minute cron pair carry the weight their spacing deserves.
+// The span reaches back one horizon, and further when the readings are sparse,
+// so a short gap between two readings cannot turn one quantization step into a
+// huge rate. A per-pair average cannot do this: it takes the whole horizon to
+// forget one bad pair, and it takes that bad pair whole when it seeds.
 func rateWalk(pts []ratePoint, tau time.Duration) ([]float64, []bool) {
 	vals := make([]float64, len(pts))
 	ok := make([]bool, len(pts))
-	ewma, seeded := 0.0, false
+	minSpan := tau / minSpanDivisor
+	start := 0 // the first point of the current segment
 	for i := 1; i < len(pts); i++ {
 		if pts[i].frac < pts[i-1].frac-resetDrop {
-			// The window rolled over. Start again rather than record the fall
-			// as a large negative rate.
-			ewma, seeded = 0, false
-			vals[i], ok[i] = 0, false
+			// The window rolled over. Start a new segment rather than measure
+			// across the fall.
+			start = i
 			continue
 		}
-		dt := pts[i].at.Sub(pts[i-1].at)
-		if dt > 0 {
-			// Utilization is a 0..1 fraction, so scale to whole percents.
-			inst := (pts[i].frac - pts[i-1].frac) * 100 / dt.Hours()
-			if seeded {
-				alpha := 1 - math.Exp(-dt.Seconds()/tau.Seconds())
-				ewma += alpha * (inst - ewma)
-			} else {
-				ewma, seeded = inst, true
-			}
+		// Anchor at the oldest point within one horizon. Reach back further
+		// while the span is too short to measure.
+		//
+		// ponytail: this rescans the span for every point, so the cost is the
+		// point count times the points in one horizon. A history holds
+		// hundreds of points, so the scan stays cheap. Carry a moving index if
+		// that ever stops being true.
+		a := i - 1
+		for a > start && (pts[i].at.Sub(pts[a].at) < minSpan || pts[i].at.Sub(pts[a-1].at) <= tau) {
+			a--
 		}
-		vals[i], ok[i] = ewma, seeded
+		span := pts[i].at.Sub(pts[a].at)
+		if span < minSpan {
+			// The segment is too young to measure. Report nothing rather than
+			// a number the readings cannot support.
+			continue
+		}
+		// Utilization is a 0..1 fraction, so scale to whole percents.
+		vals[i] = (pts[i].frac - pts[a].frac) * 100 / span.Hours()
+		ok[i] = true
 	}
 	return vals, ok
 }
 
 // burnRate returns percent of the window consumed per hour, and ok=false when
 // the history cannot support an estimate. That covers an empty or one-point
-// history, the minutes right after a window rollover, and a newest reading too
-// old to speak for now.
+// history, a segment still too young to measure, and a newest reading too old
+// to speak for now.
 func burnRate(readings []Reading, name string, now time.Time) (float64, bool) {
 	pts := ratePoints(readings, name)
 	if len(pts) < 2 {

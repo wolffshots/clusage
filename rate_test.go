@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -109,10 +110,13 @@ func TestRateWalkIgnoresADuplicateTimestamp(t *testing.T) {
 	pts := points(3, 0.1, 0.02, 10*time.Minute)
 	pts = append(pts, ratePoint{at: pts[2].at, frac: pts[2].frac + 0.3})
 	vals, ok := rateWalk(pts, tauFor("5h"))
-	// The duplicate carries no elapsed time, so it must not divide by zero and
-	// must not change the estimate.
-	if !ok[3] || vals[3] != vals[2] {
-		t.Fatalf("a zero gap must carry the previous estimate, got %v %v", vals, ok)
+	// The duplicate carries no elapsed time. The span reaches back past it, so
+	// the walk must not divide by zero.
+	if !ok[3] {
+		t.Fatalf("a duplicate timestamp must still carry a rate, got %v %v", vals, ok)
+	}
+	if math.IsInf(vals[3], 0) || math.IsNaN(vals[3]) {
+		t.Fatalf("a zero gap must not divide by zero, got %v", vals[3])
 	}
 }
 
@@ -250,3 +254,66 @@ func TestBurnRateForAWindowWithNoLength(t *testing.T) {
 
 // mustEmpty lets the test above assert on the values slice alone.
 func mustEmpty(vals []float64, _ []time.Time) []float64 { return vals }
+
+func TestRateWalkDoesNotStickAfterAShortFastPair(t *testing.T) {
+	// The bug this guards. A segment opens on a short fast pair, then nothing
+	// is used for hours. The rate must fall to near zero, not hold the spike.
+	//
+	// The real case: two sources disagreed by 4 points on the 7d window, that
+	// fall opened a new segment, and the next pair moved 1 point in 106
+	// seconds. That pair alone reads as 136 percent per hour.
+	base := time.Date(2026, 9, 15, 8, 0, 0, 0, time.UTC)
+	pts := []ratePoint{
+		{at: base, frac: 0.05},
+		{at: base.Add(106 * time.Second), frac: 0.09},
+	}
+	// Seven hours of readings five minutes apart that barely move.
+	for i := 1; i <= 84; i++ {
+		pts = append(pts, ratePoint{
+			at:   base.Add(106*time.Second + time.Duration(i)*5*time.Minute),
+			frac: 0.09,
+		})
+	}
+	vals, ok := rateWalk(pts, tauFor("7d"))
+	last := len(pts) - 1
+	if !ok[last] {
+		t.Fatal("seven hours of readings must carry a rate")
+	}
+	if got := vals[last]; got > 1 {
+		t.Fatalf("a flat seven hours must read near 0%%/h, got %v", got)
+	}
+}
+
+func TestRateWalkRefusesASpanTooShortToMeasure(t *testing.T) {
+	// The utilization header carries two decimals, so one step is a whole
+	// percent. Over 16 seconds that step reads as 225 percent per hour. The
+	// walk must refuse rather than report it.
+	base := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+	pts := []ratePoint{
+		{at: base, frac: 0.20},
+		{at: base.Add(16 * time.Second), frac: 0.21},
+	}
+	_, ok := rateWalk(pts, tauFor("7d"))
+	if ok[1] {
+		t.Fatal("a 16 second span cannot support a 7d rate")
+	}
+}
+
+func TestRateWalkWidensTheSpanWhenReadingsAreSparse(t *testing.T) {
+	// Two readings a minute apart after a long quiet gap. The span must reach
+	// back past the gap rather than report nothing.
+	base := time.Date(2026, 9, 15, 9, 0, 0, 0, time.UTC)
+	pts := []ratePoint{
+		{at: base, frac: 0.42},
+		{at: base.Add(72 * time.Minute), frac: 0.43},
+		{at: base.Add(73 * time.Minute), frac: 0.43},
+	}
+	vals, ok := rateWalk(pts, tauFor("5h"))
+	if !ok[2] {
+		t.Fatal("a sparse history must still carry a rate")
+	}
+	// One point over 73 minutes is about 0.8 percent per hour.
+	if got := vals[2]; got < 0.5 || got > 1.1 {
+		t.Fatalf("want about 0.8%%/h, got %v", got)
+	}
+}
