@@ -589,19 +589,60 @@ wait, pay overage and stop: write the current state to a handoff file, then
 stop. A fresh session picks the work up from that file, so nothing in the
 denied session's context is lost when you walk away from it.
 
-The file is `HANDOFF.md` in the session's working directory. Set
-`handoff_file` to move it, or to `off` to drop the option. The deny tells the
-agent how to write it:
+The deny tells the agent how to write it:
 
-- The guard lets `Read`, `Write`, `Edit` and `MultiEdit` through for that one
-  path, and nothing else. The agent writes from what the session already
+- The guard lets `Read`, `Write`, `Edit` and `MultiEdit` through for the
+  handoff, and nothing else. The agent writes from what the session already
   knows, and runs no git, build or test to gather more.
 - The file is markdown for an agent with no context: the goal in your words,
   what is done and whether it is committed and pushed, where the work stopped,
   the next steps as a checklist, decisions and dead ends, open questions, and
   the commands that build and test the work.
 - The agent then tells you the path, and that a fresh session resumes with
-  `read HANDOFF.md and continue from its next steps`.
+  `read <path> and continue from its next steps`.
+
+#### Where it goes
+
+A project can keep a handoff per piece of work, indexed like any other work
+tracker. Name the location in a router doc, the always-loaded file that
+router-reference-docs lays out, as a row that mentions a handoff or next steps
+and gives a backticked markdown path:
+
+```markdown
+| Read this | When |
+|---|---|
+| `docs/work/<work>.md` | Handoff and next steps for one piece of work. Index: `docs/work/README.md` |
+```
+
+The guard looks for that row in this order, and the first one wins:
+
+1. `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md` and `AGENTS.md` in the
+   session's working directory, then in each directory above it up to the
+   repository root.
+2. The same files in your Claude folder (`~/.claude`, or
+   `CLAUDE_CONFIG_DIR`). A path there such as `work/{project}/{work}.md`
+   keeps every project's handoffs out of the projects themselves.
+3. `handoff_file`, which defaults to `HANDOFF.md` in the working directory.
+
+A path is relative to the router that names it, and `~/` is your home
+directory. A placeholder such as `<work>` or `{slug}` makes the path a
+tracker: the guard then lets the agent write any markdown file under the
+directory above the first placeholder, so it can add a file for this piece of
+work and update the index beside it. A path ending in `/` is a tracker
+directory. The router itself stays writable too, in case it holds the index.
+The deny quotes the row, and tells the agent to add the new file to the index
+as a trigger row, the way router-reference-docs writes a References table.
+
+Set `handoff_file` to `off` to drop the option everywhere.
+
+#### It stays out of git
+
+A handoff is local state for the next session, not project history. When the
+agent writes one inside a repository, the guard adds its path to that
+repository's `.git/info/exclude`, which git reads like `.gitignore` but never
+commits. A worktree uses the main checkout's exclude file. The deny also tells
+the agent not to stage or commit it. An exclude only hides untracked files, so
+a tracker you already commit stays tracked. A router doc is never excluded.
 
 The handoff never cuts into overage. It spends what is left of a window below
 its limit, so an exhausted window leaves the option out of the deny and denies
@@ -624,7 +665,7 @@ default in the table.
 | `max_wait_seconds` | `CLUSAGE_GUARD_MAXWAIT` | `45` | Deny after pausing this long. |
 | `allow_overage` | `CLUSAGE_GUARD_ALLOW_OVERAGE` | `false` | Set to `1` to keep working once a window is exhausted. |
 | `allow_tools` | `CLUSAGE_GUARD_ALLOW_TOOLS` | `ScheduleWakeup CronCreate AskUserQuestion` | Tool names that pass without a check. |
-| `handoff_file` | `CLUSAGE_GUARD_HANDOFF` | `HANDOFF.md` | The file a denied agent may write its state to. Relative to the session's working directory. `off` drops the option. |
+| `handoff_file` | `CLUSAGE_GUARD_HANDOFF` | `HANDOFF.md` | The file a denied agent may write its state to, when no router doc names one. Relative to the session's working directory. `off` drops the option. |
 
 The switches below have no config field. Two of them turn a feature off, which
 is what the off switch file below is for, and two exist for the test suite.

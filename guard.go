@@ -329,9 +329,9 @@ func verdict(rows []usageRow, g Guard) decision {
 type guardRail struct {
 	g      Guard
 	stderr io.Writer
-	// handoff is the absolute handoff file for this session, "" when the
-	// option is off.
-	handoff string
+	// handoff is where this session's handoff goes, nil when the option is
+	// off.
+	handoff *handoffPlan
 }
 
 // deny renders a PreToolUse deny. Every deny names the tools that still pass,
@@ -382,30 +382,22 @@ const overage = "If the user picks overage, the guard has to stand down first, a
 
 // retry tells the caller what to do about the wait. It never tells the agent
 // to park itself. A wait of hours is the user's decision, so the agent asks
-// and waits for an answer. handoff is the file the agent may write its state
-// to, and "" leaves that option out.
+// and waits for an answer. handoff says how to write the handoff, and ""
+// leaves that option out.
 func retry(window, reset, handoff string) string {
 	if reset == "" {
 		if handoff == "" {
 			return "The " + window + " window reported no reset time, so there is nothing to wait for. Stop all work now, in this agent and in every subagent. Report the limit to the user, and ask whether to stop here or keep working and pay overage. Wait for the answer. Do not decide it yourself. " + overage
 		}
-		return "The " + window + " window reported no reset time, so there is nothing to wait for. Stop all work now, in this agent and in every subagent. Report the limit to the user, and ask whether to write the current state to a handoff file and stop, keep working and pay overage, or stop here. Wait for the answer. Do not decide it yourself. " + handoffSteps(handoff) + " " + overage
+		return "The " + window + " window reported no reset time, so there is nothing to wait for. Stop all work now, in this agent and in every subagent. Report the limit to the user, and ask whether to write the current state to a handoff file and stop, keep working and pay overage, or stop here. Wait for the answer. Do not decide it yourself. " + handoff + " " + overage
 	}
 	options := "Offer three options: wait for the reset and resume then, keep working now and pay overage, or stop here."
 	steps := ""
 	if handoff != "" {
 		options = "Offer four options: wait for the reset and resume then, write the current state to a handoff file so a fresh session can resume from it and stop, keep working now and pay overage, or stop here."
-		steps = " " + handoffSteps(handoff)
+		steps = " " + handoff
 	}
 	return "It " + reset + ". Stop all other work now, in this agent and in every subagent. Do not run clusage again to check it, and trust that time. Do not schedule a resume before the user answers. Ask the user first, as a short multiple choice question, and wait for the answer. " + options + " Set a timer or a wake-up only if the user picks the first option. If the user waits, chain the wake-ups. A wake-up caps at one hour, and a gap over 55 minutes expires the prompt cache. Use legs of 55 minutes or less. Put the leg number, the total, and the reset time into the message the wake-up delivers back to you. On waking, read the leg number from that message. On an interim leg, schedule the next leg and do nothing else. Then end the turn. Never call a tool to check the clock, because a tool call can be denied." + steps + " " + overage
-}
-
-// handoffSteps says how to write the handoff file. The guard lets the file
-// tools through for that one path while no window is exhausted, so the write
-// spends what is left of the window and never overage. Every other tool stays
-// denied, so the agent writes from what the session already knows.
-func handoffSteps(path string) string {
-	return "If the user picks the handoff, the guard still lets Read, Write and Edit through for one file only: " + path + ". Only the main agent writes it. Call no other tool, and do not run git, a build or a test to gather facts, because those calls are denied. Write from what this session already knows. If the file exists, Read it first, then replace it with Write. Write it as markdown for an agent that starts with no context, with these sections: the goal, in the user's own words; what is done, naming the files changed and whether the changes are committed and pushed, and on which branch; the work in progress and exactly where it stopped; the next steps, as an ordered checklist; decisions made and why, and dead ends not to retry; open questions for the user; the commands that build and test the work. Keep it short, well under 200 lines. Then tell the user the path, and that a fresh session resumes with: read " + path + " and continue from its next steps. Then end the turn."
 }
 
 // stop denies a call that overage would pay for.
@@ -436,14 +428,14 @@ func (gr guardRail) soft(d decision) string {
 		fmtNum(d.w.pct), gr.g.MaxWait, gr.g.Soft5h, trend(d.w.pct, d.five.rate), retry("5h", d.w.reset, gr.offerHandoff(d))))
 }
 
-// offerHandoff is the handoff file a deny may offer, or "". An exhausted
-// window means overage would pay for the write, which happens when the user
-// opted in to overage, so the option drops out then.
+// offerHandoff is how a deny offers the handoff, or "". An exhausted window
+// means overage would pay for the write, which happens when the user opted in
+// to overage, so the option drops out then.
 func (gr guardRail) offerHandoff(d decision) string {
-	if exhausted(d.five) || exhausted(d.seven) {
+	if gr.handoff == nil || exhausted(d.five) || exhausted(d.seven) {
 		return ""
 	}
-	return gr.handoff
+	return gr.handoff.steps()
 }
 
 // exhausted reports whether a window's status says its quota is spent.
@@ -459,27 +451,6 @@ func (gr guardRail) handoffDeny(d decision) string {
 		w = d.seven
 	}
 	return gr.deny("clusage guard rail: the " + w.name + " window is exhausted (status " + w.status + "), so overage would pay for the handoff file, and the guard keeps it for when budget is left. Stop all work now, in this agent and in every subagent. Tell the user the window is exhausted and end the turn. " + overage)
-}
-
-// handoffFile resolves the handoff setting against the session's working
-// directory. It returns "" when the option is off or there is no directory to
-// anchor a relative path to.
-func handoffFile(setting, cwd string) string {
-	setting = strings.TrimSpace(setting)
-	if setting == "" || strings.EqualFold(setting, "off") {
-		return ""
-	}
-	if filepath.IsAbs(setting) {
-		return filepath.Clean(setting)
-	}
-	if cwd == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return ""
-		}
-		cwd = wd
-	}
-	return filepath.Join(cwd, setting)
 }
 
 // handoffTools are the tools that may touch the handoff file. Write refuses
@@ -595,14 +566,16 @@ func (gr guardRail) check(payload []byte) string {
 	if p.ToolName != "" && slices.Contains(g.AllowTools, p.ToolName) {
 		return ""
 	}
-	gr.handoff = handoffFile(g.Handoff, p.Cwd)
-	toHandoff := false
-	if gr.handoff != "" && slices.Contains(handoffTools, p.ToolName) && p.ToolInput.FilePath != "" {
+	gr.handoff = planHandoff(g.Handoff, p.Cwd)
+	target := ""
+	if gr.handoff != nil && slices.Contains(handoffTools, p.ToolName) && p.ToolInput.FilePath != "" {
 		f := p.ToolInput.FilePath
 		if !filepath.IsAbs(f) && p.Cwd != "" {
 			f = filepath.Join(p.Cwd, f)
 		}
-		toHandoff = filepath.Clean(f) == gr.handoff
+		if gr.handoff.allows(f) {
+			target = filepath.Clean(f)
+		}
 	}
 
 	// A probe older than the wait it just sized would report a stale number,
@@ -617,7 +590,7 @@ func (gr guardRail) check(payload []byte) string {
 	d := judge(interval / 60)
 	// The handoff file passes at any cut, so the agent can leave its state for
 	// a fresh session. It never passes on overage.
-	if toHandoff {
+	if target != "" {
 		switch {
 		case d.verdict == "NODATA":
 			return gr.nodata(d.reason)
@@ -625,6 +598,9 @@ func (gr guardRail) check(payload []byte) string {
 			return gr.handoffDeny(d)
 		case d.verdict == "OK":
 			mark(state, d)
+		}
+		if p.ToolName != "Read" && !samePath(target, gr.handoff.router) {
+			excludeHandoff(target)
 		}
 		return ""
 	}

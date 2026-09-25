@@ -71,10 +71,10 @@ type Guard struct {
 	// AllowTools names the tools that pass without a check. An empty list
 	// reads as unset, because the hook cannot express one either.
 	AllowTools []string `json:"allow_tools"`
-	// Handoff is the one file a denied agent may still read and write, to
-	// leave its state for a fresh session. A relative path is from the
-	// session's working directory, "off" drops the option, and an empty value
-	// reads as unset.
+	// Handoff is the file a denied agent may still read and write, to leave
+	// its state for a fresh session, when no router doc names one. A relative
+	// path is from the session's working directory, "off" drops the option,
+	// and an empty value reads as unset.
 	Handoff string `json:"handoff_file"`
 }
 
