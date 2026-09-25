@@ -556,11 +556,9 @@ func (gr guardRail) check(payload []byte) string {
 	}
 
 	var p struct {
-		ToolName  string `json:"tool_name"`
-		Cwd       string `json:"cwd"`
-		ToolInput struct {
-			FilePath string `json:"file_path"`
-		} `json:"tool_input"`
+		ToolName  string    `json:"tool_name"`
+		Cwd       string    `json:"cwd"`
+		ToolInput toolInput `json:"tool_input"`
 	}
 	_ = json.Unmarshal(payload, &p)
 	if p.ToolName != "" && slices.Contains(g.AllowTools, p.ToolName) {
@@ -573,7 +571,7 @@ func (gr guardRail) check(payload []byte) string {
 		if !filepath.IsAbs(f) && p.Cwd != "" {
 			f = filepath.Join(p.Cwd, f)
 		}
-		if gr.handoff.allows(f) {
+		if gr.handoff.allows(p.ToolName, f, p.ToolInput) {
 			target = filepath.Clean(f)
 		}
 	}
@@ -599,7 +597,7 @@ func (gr guardRail) check(payload []byte) string {
 		case d.verdict == "OK":
 			mark(state, d)
 		}
-		if p.ToolName != "Read" && !samePath(target, gr.handoff.router) {
+		if p.ToolName != "Read" && gr.handoff.excludes(target) {
 			excludeHandoff(target)
 		}
 		return ""

@@ -57,7 +57,7 @@ func TestHandoffProjectRouter(t *testing.T) {
 		{"Write", tracker, true},
 		{"Edit", filepath.Join(repo, "docs", "work", "README.md"), true},
 		{"Read", filepath.Join(repo, "CLAUDE.md"), true},
-		{"Edit", filepath.Join(repo, "CLAUDE.md"), true},
+		{"Edit", filepath.Join(repo, "CLAUDE.md"), false},
 		{"Write", filepath.Join(repo, "docs", "work", "run.sh"), false},
 		{"Write", filepath.Join(repo, "docs", "ci.md"), false},
 		{"Write", filepath.Join(cwd, "HANDOFF.md"), false},
@@ -124,7 +124,7 @@ func TestHandoffRouterNeedsAPath(t *testing.T) {
 	cwd := filepath.Join(dir, "proj")
 	writeFile(t, filepath.Join(cwd, "CLAUDE.md"), "Keep a handoff up to date.\nNext steps: run `go test ./...` and `make`.\n")
 	out, _ := runGuard(t, fxHigh5, payloadFor("Bash", cwd, ""))
-	if !strings.Contains(out, "one file only") || !strings.Contains(out, "HANDOFF.md") {
+	if !strings.Contains(out, "No router doc") || !strings.Contains(out, "HANDOFF.md, the default") {
 		t.Fatalf("the default file was not used: %s", out)
 	}
 }
@@ -144,5 +144,85 @@ func TestHandoffExcludeWorktree(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(common, "info", "exclude"))
 	if err != nil || !strings.Contains(string(raw), "/HANDOFF.md\n") {
 		t.Fatalf("not excluded in the common git dir: %q %v", raw, err)
+	}
+}
+
+// editPayload is an Edit of file from a session in cwd.
+func editPayload(cwd, file, old, updated string) string {
+	enc := func(v string) string { return strings.TrimSpace(encodeJSON(v)) }
+	return `{"tool_name":"Edit","cwd":` + enc(cwd) + `,"tool_input":{"file_path":` + enc(file) +
+		`,"old_string":` + enc(old) + `,"new_string":` + enc(updated) + `}}`
+}
+
+// writePayload is a Write of file from a session in cwd.
+func writePayload(cwd, file, content string) string {
+	enc := func(v string) string { return strings.TrimSpace(encodeJSON(v)) }
+	return `{"tool_name":"Write","cwd":` + enc(cwd) + `,"tool_input":{"file_path":` + enc(file) +
+		`,"content":` + enc(content) + `}}`
+}
+
+const teamRouter = "# Team app\n\n## References\n\n| Read this | When |\n|---|---|\n| `docs/ci.md` | A pipeline job fails |\n"
+
+const newRow = "| `.claude/work/<work>.md` | Handoff and next steps for one piece of work. Index: `.claude/work/README.md` |\n"
+
+// With no handoff row anywhere, the deny asks where the handoff goes, and
+// the guard lets a router change through only when it adds a handoff row.
+func TestHandoffAsksBeforeARouterRow(t *testing.T) {
+	dir := guardEnv(t)
+	repo := filepath.Join(dir, "repo")
+	writeFile(t, filepath.Join(repo, ".git", "HEAD"), "ref: refs/heads/main\n")
+	team := filepath.Join(repo, "CLAUDE.md")
+	writeFile(t, team, teamRouter)
+	local := filepath.Join(repo, "CLAUDE.local.md")
+	user := filepath.Join(dir, "claude", "CLAUDE.md")
+
+	out, _ := runGuard(t, fxHigh5, payloadFor("Bash", repo, ""))
+	for _, want := range []string{"Do not add that to any router doc on your own", "ask one more short multiple choice question",
+		"HANDOFF.md, the default", local, user, "a tracker the team shares: add a handoff row to " + team,
+		"change nothing else in the router"} {
+		if !strings.Contains(out, strings.Trim(encodeJSON(want), "\"\n")) {
+			t.Errorf("the deny has no %q: %s", want, out)
+		}
+	}
+
+	deny := []struct{ name, payload string }{
+		{"rewrite", editPayload(repo, team, "# Team app", "# Mine")},
+		{"no row", editPayload(repo, team, "| `docs/ci.md` | A pipeline job fails |\n", "| `docs/ci.md` | A pipeline job fails |\n| `x.md` | Notes |\n")},
+		{"write over", writePayload(repo, team, newRow)},
+		{"new local, no row", writePayload(repo, local, "# notes\n")},
+		{"tracker before the row", writePayload(repo, filepath.Join(repo, ".claude", "work", "fix.md"), "# fix\n")},
+	}
+	for _, c := range deny {
+		if out, _ := runGuard(t, fxHigh5, c.payload); out == "" {
+			t.Errorf("%s: a router change passed", c.name)
+		}
+	}
+	if b, _ := os.ReadFile(team); string(b) != teamRouter {
+		t.Fatal("the test changed the team router")
+	}
+
+	// An added row passes, in the team router or a personal one.
+	if out, _ := runGuard(t, fxHigh5, editPayload(repo, team, "| `docs/ci.md` | A pipeline job fails |\n", "| `docs/ci.md` | A pipeline job fails |\n"+newRow)); out != "" {
+		t.Errorf("an added row in the team router was denied: %s", out)
+	}
+	if out, _ := runGuard(t, fxHigh5, writePayload(repo, user, "## References\n\n"+newRow)); out != "" {
+		t.Errorf("a new user router with a row was denied: %s", out)
+	}
+	if out, _ := runGuard(t, fxHigh5, writePayload(repo, local, newRow)); out != "" {
+		t.Fatalf("a new local router with a row was denied: %s", out)
+	}
+	writeFile(t, local, newRow)
+
+	// The row now routes the handoff, and the local router stays out of git
+	// while the team router never goes in the exclude file.
+	if out, _ := runGuard(t, fxHigh5, writePayload(repo, filepath.Join(repo, ".claude", "work", "fix.md"), "# fix\n")); out != "" {
+		t.Errorf("the tracker named by the new row was denied: %s", out)
+	}
+	raw, _ := os.ReadFile(filepath.Join(repo, ".git", "info", "exclude"))
+	if !strings.Contains(string(raw), "/CLAUDE.local.md\n") || strings.Contains(string(raw), "/CLAUDE.md\n") {
+		t.Errorf("wrong exclude entries:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), "/.claude/work/fix.md\n") {
+		t.Errorf("the tracker file is not excluded:\n%s", raw)
 	}
 }

@@ -131,7 +131,7 @@ func TestGuardDecisions(t *testing.T) {
 		{"timer only on wait", fxHigh5, "", "only if the user picks"},
 		{"no reset question", fxHigh7, "", "ask whether to write the current state to a handoff file and stop, keep working and pay overage, or stop here"},
 		{"handoff option", fxHigh5, "", "write the current state to a handoff file so a fresh session can resume from it and stop"},
-		{"handoff steps", fxHigh5, `{"tool_name":"Bash","cwd":"CWD"}`, "lets Read, Write and Edit through for one file only: CWD/HANDOFF.md"},
+		{"handoff steps", fxHigh5, `{"tool_name":"Bash","cwd":"CWD"}`, "the guard lets Read, Write and Edit through for CWD/HANDOFF.md"},
 		{"handoff resume", fxHigh5, `{"tool_name":"Bash","cwd":"CWD"}`, "read CWD/HANDOFF.md and continue from its next steps"},
 		{"handoff 7d", fxHigh7, "", "handoff file"},
 		{"handoff other file", fxHigh5, `{"tool_name":"Write","cwd":"CWD","tool_input":{"file_path":"CWD/main.go"}}`, "5h limit is at 94%"},

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -148,6 +149,9 @@ func loadConfig() (Config, string, error) {
 		return Config{}, path, err
 	}
 	cfg := defaultConfig
+	// Unmarshal fills a slice in place, so a copy keeps a file's allow_tools
+	// from overwriting the defaults every later read falls back to.
+	cfg.Guard.AllowTools = slices.Clone(defaultConfig.Guard.AllowTools)
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return Config{}, path, fmt.Errorf("parse %s: %w", path, err)
 	}
