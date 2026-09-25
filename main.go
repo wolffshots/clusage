@@ -57,6 +57,8 @@ func run(args []string) error {
 		return usage(args)
 	case "hook":
 		return hook(args)
+	case "guard":
+		return guardCmd(args)
 	case "guard-config":
 		return guardConfig()
 	case "statusline":
@@ -124,11 +126,7 @@ func usage(args []string) error {
 		return err
 	}
 	cfg.Source = *source
-	// Checked before the cache, so an unset source is reported even while a
-	// stored reading is fresh enough to print.
-	if !slices.Contains(sources, cfg.Source) {
-		return errNoSource(cfgPath, cfg.Source)
-	}
+	cfg.ThresholdMinutes = *threshold
 
 	db, err := openDB()
 	if err != nil {
@@ -136,45 +134,18 @@ func usage(args []string) error {
 	}
 	defer db.Close()
 
-	now := time.Now()
-	last, ok, err := latestReadingFrom(db, cfg.readingModels(*model)...)
+	u, err := readReport(db, cfg, cfgPath, *model, *force)
 	if err != nil {
 		return err
-	}
-	// The rate column needs history. Seven days covers the longest window's
-	// smoothing horizon, and these rows are small.
-	hist := loadHistory(db, now.Add(-7*24*time.Hour))
-	if ok && !*force && now.Sub(last.FetchedAt) < time.Duration(*threshold)*time.Minute {
-		report(last, hist, now, true, *verbose)
-		return nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	cfg.ThresholdMinutes = *threshold
-	r, used, fresh, err := readUsage(ctx, db, cfg, cfgPath, *model)
-	if err != nil {
-		return err
-	}
-	if !fresh {
-		report(r, hist, now, true, *verbose)
-		return nil
 	}
 	// The report goes out before the writes. The API call is already paid for,
-	// and the guard rail hook reads this output, so a failed write must not
-	// swallow the numbers.
-	// The new reading is saved further down, so add it here for the rate.
-	report(r, append(hist, r), time.Now(), false, *verbose)
-	if err := saveReading(db, r); err != nil {
-		fmt.Fprintln(os.Stderr, "clusage: save reading:", err)
+	// so a failed write must not swallow the numbers.
+	report(u.r, u.hist, u.now, u.cached, *verbose)
+	if u.cached {
+		return nil
 	}
-	// Only the probe bills tokens. A usage endpoint reading or a rejected probe
-	// has no usage block, and a zero sample would count a call that cost nothing.
-	if used.total() > 0 {
-		if err := saveTokens(db, TokenSample{CalledAt: r.FetchedAt, Model: *model, Used: used}); err != nil {
-			fmt.Fprintln(os.Stderr, "clusage: save tokens:", err)
-		}
-	}
+	u.save(db, *model)
+	used := u.used
 	if *verbose {
 		total, calls, err := tokenTotals(db)
 		if err != nil {
@@ -186,6 +157,66 @@ func usage(args []string) error {
 			total.total(), calls, total.cached())
 	}
 	return nil
+}
+
+// usageRead is one reading as clusage usage reports it.
+type usageRead struct {
+	r    Reading
+	hist []Reading // readings for the rate, the new reading included
+	now  time.Time
+	// cached is true when the reading came from the database, so there is
+	// nothing new to save.
+	cached bool
+	used   tokenUse
+}
+
+// readReport reads usage the way clusage usage does: a stored reading younger
+// than cfg.ThresholdMinutes, else a new one from the source chain. The guard
+// rail hook reads through here too, so its failures land in the same table.
+func readReport(db *sql.DB, cfg Config, cfgPath, model string, force bool) (usageRead, error) {
+	// Checked before the cache, so an unset source is reported even while a
+	// stored reading is fresh enough to print.
+	if !slices.Contains(sources, cfg.Source) {
+		return usageRead{}, errNoSource(cfgPath, cfg.Source)
+	}
+	now := time.Now()
+	last, ok, err := latestReadingFrom(db, cfg.readingModels(model)...)
+	if err != nil {
+		return usageRead{}, err
+	}
+	// The rate column needs history. Seven days covers the longest window's
+	// smoothing horizon, and these rows are small.
+	hist := loadHistory(db, now.Add(-7*24*time.Hour))
+	if ok && !force && now.Sub(last.FetchedAt) < time.Duration(cfg.ThresholdMinutes)*time.Minute {
+		return usageRead{r: last, hist: hist, now: now, cached: true}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	r, used, fresh, err := readUsage(ctx, db, cfg, cfgPath, model)
+	if err != nil {
+		return usageRead{}, err
+	}
+	if !fresh {
+		return usageRead{r: r, hist: hist, now: now, cached: true}, nil
+	}
+	// The new reading is saved later, so add it here for the rate.
+	return usageRead{r: r, hist: append(hist, r), now: time.Now(), used: used}, nil
+}
+
+// save stores a new reading and the tokens its call spent. A failed write is
+// reported and not returned, because the numbers are already in hand.
+func (u usageRead) save(db *sql.DB, model string) {
+	if err := saveReading(db, u.r); err != nil {
+		fmt.Fprintln(os.Stderr, "clusage: save reading:", err)
+	}
+	// Only the probe bills tokens. A usage endpoint reading or a rejected probe
+	// has no usage block, and a zero sample would count a call that cost nothing.
+	if u.used.total() > 0 {
+		if err := saveTokens(db, TokenSample{CalledAt: u.r.FetchedAt, Model: model, Used: u.used}); err != nil {
+			fmt.Fprintln(os.Stderr, "clusage: save tokens:", err)
+		}
+	}
 }
 
 // loadHistory reads readings for the burn rate column. The rate is an
@@ -205,8 +236,8 @@ func report(r Reading, hist []Reading, now time.Time, cached bool, verbose bool)
 	for _, w := range parseWindows(r.Headers) {
 		rate, ok := burnRate(hist, w.Name, now)
 		// The rate column sits between the status and the reset text. The
-		// guard rail hook reads $1, $2 and $4 and then searches for "resets",
-		// so a field added here moves nothing it depends on.
+		// CLUSAGE_GUARD_FIXTURE parser reads $1, $2 and $4 and then searches
+		// for "resets", so a field added here moves nothing it depends on.
 		line := fmt.Sprintf("%-9s%-11s%-18s%-10s%s",
 			// The trailing space keeps a long name such as 7d-sonnet off its percent.
 			w.Name+" ", percentUsed(w.Utilization), w.Status, rateLabel(rate, ok),

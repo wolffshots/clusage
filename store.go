@@ -50,10 +50,9 @@ type Config struct {
 	Guard Guard `json:"guard"`
 }
 
-// Guard holds the settings of the guard rail hook. The hook is a shell script,
-// so it reads them through "clusage guard-config" rather than parsing the JSON
-// itself. A CLUSAGE_GUARD_* environment variable still wins over the file, so a
-// single terminal session can override the machine.
+// Guard holds the settings of the guard rail hook. A CLUSAGE_GUARD_* environment
+// variable wins over the file, so a single terminal session can override the
+// machine.
 type Guard struct {
 	// Soft5h pauses and polls once the 5h window reaches this percent.
 	Soft5h int `json:"soft_5h_percent"`
@@ -159,7 +158,7 @@ func loadConfig() (Config, string, error) {
 	return cfg, path, nil
 }
 
-// normalize replaces any value the hook script would reject with the default,
+// normalize replaces any value the hook would reject with the default,
 // so the Config tab reports the number the guard actually applies.
 //
 // Zero stays legal for three of them. No ceiling means check on every call, no

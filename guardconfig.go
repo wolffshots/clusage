@@ -10,8 +10,8 @@ import (
 )
 
 // guardEnv lists the environment variable that overrides each guard setting.
-// The hook script reads the same names, so the Config tab has to resolve them
-// the same way or it reports a number the guard is not using.
+// The hook and the Config tab both resolve them through effectiveGuard, so the
+// tab cannot report a number the guard is not using.
 const (
 	envSoft5h       = "CLUSAGE_GUARD_5H"
 	envHard7d       = "CLUSAGE_GUARD_7D"
@@ -23,21 +23,18 @@ const (
 	envAllowTools   = "CLUSAGE_GUARD_ALLOW_TOOLS"
 )
 
-// guardConfig prints the guard settings as "key=value" lines for the hook
-// script to read. The script is bash, so it cannot parse config.json, and this
-// keeps the defaults and the bounds in one place.
-//
-// The output is read key by key rather than eval'd, so a value never reaches a
-// shell as code.
+// guardConfig prints the guard settings the hook applies, as "key=value" lines:
+// the environment over config.json over the defaults.
 func guardConfig() error {
 	cfg, _, err := loadConfig()
 	if err != nil {
 		return err
 	}
-	return writeGuardConfig(os.Stdout, cfg.Guard)
+	g, _ := effectiveGuard(cfg.Guard)
+	return writeGuardConfig(os.Stdout, g)
 }
 
-// writeGuardConfig renders the lines the hook script reads.
+// writeGuardConfig renders the guard settings as "key=value" lines.
 func writeGuardConfig(w io.Writer, g Guard) error {
 	overage := 0
 	if g.AllowOverage {
@@ -60,7 +57,7 @@ func writeGuardConfig(w io.Writer, g Guard) error {
 	return nil
 }
 
-// guardNumber resolves one guard number the way the hook script does: an
+// guardNumber resolves one guard number the way the hook does: an
 // environment variable that reads as a whole number wins over the config file.
 // The second return is the variable that overrode it, empty when none did.
 func guardNumber(env string, cfg int) (int, string) {
@@ -75,8 +72,7 @@ func guardNumber(env string, cfg int) (int, string) {
 	return n, env
 }
 
-// guardBool resolves an on/off guard setting. Only "1" turns it on, which is
-// what the hook script tests for.
+// guardBool resolves an on/off guard setting. Only "1" turns it on.
 func guardBool(env string, cfg bool) (bool, string) {
 	v, ok := os.LookupEnv(env)
 	if !ok {
@@ -85,8 +81,8 @@ func guardBool(env string, cfg bool) (bool, string) {
 	return v == "1", env
 }
 
-// guardText resolves the allow list. An empty variable reads as unset, because
-// the hook script cannot express an empty list either.
+// guardText resolves the allow list. An empty variable reads as unset, so the
+// default list comes back.
 func guardText(env string, cfg []string) ([]string, string) {
 	v := os.Getenv(env)
 	if strings.TrimSpace(v) == "" {
@@ -121,16 +117,18 @@ func effectiveGuard(g Guard) (Guard, []string) {
 	note(name)
 	g.AllowTools, name = guardText(envAllowTools, g.AllowTools)
 	note(name)
-	// A bad override falls through to the file, and the hook script does the
-	// same, so normalize here rather than trust the variable.
+	// A bad override falls through to the file, so normalize here rather than
+	// trust the variable.
 	g.normalize()
 	return g, over
 }
 
 // guardStatus is what the Config tab reports about the hook itself.
 type guardStatus struct {
-	// Registered is true when settings.json names the guard script.
+	// Registered is true when settings.json names the guard rail hook.
 	Registered bool
+	// Legacy is true when an entry still runs the old hook script.
+	Legacy bool
 	// Off is true when the off switch file exists, which stands the guard
 	// down for every session on the machine.
 	Off bool
@@ -159,9 +157,30 @@ func readGuardStatus() guardStatus {
 	if _, err := os.Stat(st.OffPath); err == nil {
 		st.Off = true
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, "settings.json"))
-	if err == nil {
-		st.Registered = strings.Contains(string(raw), "clusage-guard")
+	settings, err := readSettings(filepath.Join(dir, "settings.json"))
+	if err != nil {
+		return st
+	}
+	hooks, _ := settings.get("hooks").(*jsonObj)
+	if hooks == nil {
+		return st
+	}
+	for _, ev := range *hooks {
+		entries, _ := ev.v.([]any)
+		for _, e := range entries {
+			if !ownedEntry(e) {
+				continue
+			}
+			st.Registered = true
+			for _, h := range e.(*jsonObj).get("hooks").([]any) {
+				if !ownedHook(h) {
+					continue
+				}
+				if c, _ := h.(*jsonObj).get("command").(string); strings.Contains(c, "clusage-guard") {
+					st.Legacy = true
+				}
+			}
+		}
 	}
 	return st
 }

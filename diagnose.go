@@ -479,10 +479,14 @@ func diagnose(db *sql.DB, cfg Config, cfgPath string, now time.Time) diagnosis {
 	if gs.Registered {
 		hook = "registered"
 	}
+	if gs.Legacy {
+		hook += " through the old script"
+		suggest(sugWarn, "The guard rail runs through the old hook script. Run clusage hook install to register clusage hook run instead.")
+	}
 	if gs.Off {
 		hook += ", off switch present"
 		if gs.Registered {
-			suggest(sugInfo, "The guard rail is off, because %s exists. Remove it to turn the guard back on.", tilde(gs.OffPath))
+			suggest(sugInfo, "The guard rail is off, because %s exists. Run clusage guard on to turn the guard back on.", tilde(gs.OffPath))
 		}
 	}
 	if gs.Disabled {
@@ -825,18 +829,7 @@ func storeLines(db *sql.DB, cfgPath string, traces []trace, now time.Time) []str
 	}
 	pairs = append(pairs, [2]string{"rows", strings.Join(counts, ", ")})
 
-	stamp := os.Getenv("CLUSAGE_GUARD_STATE")
-	if stamp == "" {
-		dir := os.Getenv("TMPDIR")
-		if dir == "" {
-			dir = "/tmp"
-		}
-		user := os.Getenv("USER")
-		if user == "" {
-			user = "x"
-		}
-		stamp = filepath.Join(dir, "clusage-guard-"+user+".stamp")
-	}
+	stamp := stampPath()
 	check := "no check recorded"
 	// The hook writes "<unix seconds> <5h> <7d> <5h rate> <7d rate>".
 	if raw, err := os.ReadFile(stamp); err == nil {

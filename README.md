@@ -310,7 +310,7 @@ color tracks load: green under 60%, amber under 85%, red at or above 85%.
 badge means `~/.claude/clusage-guard.off` is absent. A red `GUARD OFF` badge
 means the file exists and every session runs unguarded. Press `o` to create or
 remove the file. The panel reads the file again after each press and every 20
-seconds, so a `touch` or `rm` in a shell shows up too. A warning line appears
+seconds, so `clusage guard off` or `on` in a shell shows up too. A warning line appears
 when the hook is not registered, or when `CLUSAGE_GUARD_DISABLE=1` is set.
 
 **Now** also shows `burn 14.2%/h  full in 4h43m` under each gauge. The
@@ -427,8 +427,9 @@ configured value for one run.
 
 ## Guard rail hook
 
-`hooks/clusage-guard.sh` is a Claude Code hook. On `PreToolUse` it reads the
-same numbers as `clusage usage` and acts on them before each tool call:
+`clusage hook run` is a Claude Code hook. It runs on macOS, Linux and Windows.
+On `PreToolUse` it reads the same numbers as `clusage usage` and acts on them
+before each tool call:
 
 | Condition | Action |
 |---|---|
@@ -455,7 +456,7 @@ names its cause and its fix in the message the agent sees.
 
 A denied agent cannot repair `clusage`, so that deny carries its own way out. It
 gives the user two commands, `clusage usage -force` to see the underlying error
-and `touch ~/.claude/clusage-guard.off` to stand the guard down. The off switch
+and `clusage guard off` to stand the guard down. The off switch
 matters more here than anywhere else, because a broken probe otherwise denies
 every tool call, including the ones needed to diagnose it.
 
@@ -470,11 +471,11 @@ cannot do for you. Every tool it would use to make the off switch is denied. So
 the deny hands the agent the two commands to give you:
 
 ```sh
-touch ~/.claude/clusage-guard.off    # stand the guard down, work on overage
-rm ~/.claude/clusage-guard.off       # put it back when the work is done
+clusage guard off    # stand the guard down, work on overage
+clusage guard on     # put it back when the work is done
 ```
 
-The guard stays off while that file exists, so the second command matters. An
+The guard stays off until the second command runs, so it matters. An
 exhausted window prints the same pair, next to the `CLUSAGE_GUARD_ALLOW_OVERAGE`
 variable, which only a terminal session can set.
 
@@ -517,23 +518,23 @@ your client.
 clusage hook install      # register it in ~/.claude/settings.json
 clusage hook status       # show the registered command and timeout
 clusage hook uninstall    # remove it again
-clusage guard-config      # print the thresholds the script reads
+clusage guard-config      # print the thresholds the hook applies
 ```
 
-Install does two things. It links the script that ships with this build into
-`~/.claude/hooks/clusage-guard.sh`, and it writes one `PreToolUse` entry and one
-`SessionStart` entry naming that link. The rest of `settings.json` stays as it
-is. An install over an older version adds the `SessionStart` entry and leaves
-everything else alone.
+Install writes one `PreToolUse` entry and one `SessionStart` entry that run
+`clusage hook run`. The rest of `settings.json` stays as it is. Homebrew and
+Scoop both put `clusage` on `PATH` at a path that survives an upgrade, so the
+hook upgrades with clusage and needs no further step. Without `clusage` on
+`PATH`, install names the binary by its full path, in the exec form (`command`
+plus `args`) that runs with no shell. `clusage hook status` prints each entry
+and reports a command that does not resolve.
 
-The registered path is therefore the same on every machine, whatever the
-install prefix is. A `brew upgrade` replaces the script the link points at, so
-the hook upgrades with clusage and needs no further step. `clusage hook status`
-prints the link and its target, and reports a broken link.
-
-Install refuses to overwrite a real file at the link path. Uninstall removes the
-entry and the link, and never a real file. Set `CLAUDE_CONFIG_DIR` to work on a
-different settings file.
+An install over an older version rewrites its entries. That includes an entry
+that ran the old `clusage-guard.sh` script, and install removes the link that
+version made in `~/.claude/hooks`. It never removes a real file. The script
+still ships as a wrapper that runs `clusage hook run`, so an old entry keeps
+working until you rerun install. Set `CLAUDE_CONFIG_DIR` to work on a different
+settings file.
 
 How often a check runs scales with usage. The guard remembers what the last
 check saw and picks the next wait from it, on a quadratic ramp between
@@ -551,8 +552,8 @@ against its own threshold, and the closer of the two drives the wait:
 
 The ramp stays slow while there is headroom, because every check spends real
 usage. It falls to 30s near a threshold, where overshooting into overage costs
-more than the probes do. Run `bash clusage-guard.sh --interval <5h> <7d>` to
-print the wait for any pair. Set both bounds to the same number for a fixed
+more than the probes do. Run `clusage hook interval <5h> <7d>` to print the
+wait for any pair. Set both bounds to the same number for a fixed
 interval. A cached check costs about 20ms.
 
 Every bound tolerates a bad value rather than break the guard.
@@ -577,8 +578,8 @@ whichever wait is shorter:
 The division by four lands four checks before the threshold rather than one.
 An unknown or falling rate contributes nothing, so the ramp decides on its own.
 
-Run `bash clusage-guard.sh --project <percent> <rate> <cut>` to print the wait
-for any triple.
+Run `clusage hook project <percent> <rate> <cut>` to print the wait for any
+triple.
 
 ### Guard rail settings
 
@@ -605,11 +606,11 @@ is what the off switch file below is for, and two exist for the test suite.
 |---|---|---|
 | `CLUSAGE_GUARD_DISABLE` | `0` | Set to `1` to turn the guard off. |
 | `CLUSAGE_RESUME_DISABLE` | `0` | Set to `1` to turn the resume report off. |
-| `CLUSAGE_GUARD_STATE` | `$TMPDIR/clusage-guard-$USER.stamp` | Where the last check is recorded. Every session shares one file. |
-| `CLUSAGE_GUARD_FIXTURE` | unset | Read usage from a file instead of clusage. Also skips the config read. |
+| `CLUSAGE_GUARD_STATE` | `<temp dir>/clusage-guard-<user>.stamp` | Where the last check is recorded. Every session shares one file. |
+| `CLUSAGE_GUARD_FIXTURE` | unset | Read usage table text from a file instead of reading usage. Also skips the config read. |
 
-The hook is a shell script, so it cannot parse JSON. It reads the fields
-through `clusage guard-config`, which prints them as `key=value` lines:
+`clusage guard-config` prints the settings the hook applies, as `key=value`
+lines:
 
 ```sh
 $ clusage guard-config
@@ -623,18 +624,16 @@ allow_overage=0
 allow_tools=ScheduleWakeup CronCreate AskUserQuestion
 ```
 
-The script reads those lines key by key and never evaluates them, and it takes
-only a known key with a plain value. A clusage that is missing or broken yields
-no lines, which leaves the defaults. The Config tab reports the resolved
-numbers, and marks the rows an environment variable took over.
+The Config tab reports the same numbers, and marks the rows an environment
+variable took over.
 
 ### The off switch
 
 The guard also stops if `~/.claude/clusage-guard.off` exists:
 
 ```sh
-touch ~/.claude/clusage-guard.off    # guard off
-rm ~/.claude/clusage-guard.off       # guard on again
+clusage guard off    # create the file, guard off
+clusage guard on     # remove it, guard on again
 ```
 
 `CLUSAGE_GUARD_DISABLE` cannot help here. The desktop app gives no way to set
@@ -790,13 +789,12 @@ the wrong time. The Config tab flags it in red.
 ```sh
 go test ./...     # unit tests, plus a full render of every tab at 96x32
 go vet ./...
-bash hooks/clusage-guard.test.sh   # hook decisions, resume report, registration
 vhs demo/clusage.tape              # re-record the README demo, see demo/README.md
 ```
 
-`TestGuardHookEndToEnd` builds clusage, starts a fake API, and runs the real
-hook script against both. It needs `bash` and `go` on the PATH, and it skips on
-Windows and under `go test -short`.
+`TestGuardHookEndToEnd` builds clusage, starts a fake API, and runs
+`clusage hook run` against it. It needs `go` on the PATH, and it skips under
+`go test -short`. The release workflow runs the tests on Windows as well.
 
 `TestRenderTabs` drives the model through `Update` and logs each tab, so
 `go test -run TestRenderTabs -v .` prints the whole UI without a terminal.

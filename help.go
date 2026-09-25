@@ -16,8 +16,9 @@ Commands:
   usage         Print one line per limit window and exit.
   statusline    Store the numbers Claude Code gives its status line.
   setup         Store a token in the macOS keychain.
-  hook          Install, remove or check the guard rail hook.
-  guard-config  Print the guard rail settings the hook reads.
+  hook          Run, install, remove or check the guard rail hook.
+  guard         Turn the guard rail off or back on.
+  guard-config  Print the guard rail settings the hook applies.
   doctor        Print a diagnosis of the setup, with suggestions.
   help          Show this help, or the help for one command.
 
@@ -175,32 +176,55 @@ needs, gives way to the next token in the list above.
   clusage hook install
   clusage hook status
   clusage hook uninstall
+  clusage hook run
+  clusage hook interval <5h percent> <7d percent>
+  clusage hook project <percent> <rate> <cut>
 
 The guard rail hook runs before each Claude Code tool call and checks your
-limits with clusage usage. It pauses when the 5h window is nearly spent, and
-denies calls once a window is exhausted or the 7d window passes its cut. A
-deny tells the agent when to retry.
+limits the way clusage usage does. It pauses when the 5h window is nearly
+spent, and denies calls once a window is exhausted or the 7d window passes its
+cut. A deny tells the agent when to retry. On a resumed session it reports
+what the resume costs once the prompt cache has expired. It runs on macOS,
+Linux and Windows.
 
 Actions:
-  install    Link the hook script into ~/.claude/hooks and register it in
-             ~/.claude/settings.json. The rest of settings.json is untouched.
+  install    Register clusage hook run in ~/.claude/settings.json. The rest of
+             settings.json is untouched. An entry for the old hook script is
+             rewritten, and its link in ~/.claude/hooks is removed.
   status     Show the registered command, its timeout, and the off switch.
   uninstall  Remove the registration again.
+  run        Handle one hook event. Claude Code runs this, with the event on
+             stdin.
+  interval   Print the seconds the guard waits between checks at these levels.
+  project    Print the wait the burn rate projection picks, if any.
+
+Install writes "clusage hook run" when clusage is on PATH. Otherwise it names
+this binary by its full path, in the exec form that runs with no shell.
 
 Turn it off for a while:
-  touch ~/.claude/clusage-guard.off   # guard stands down
-  rm ~/.claude/clusage-guard.off      # guard is back
+  clusage guard off   # guard stands down in every session
+  clusage guard on    # guard is back
 Or press o on the Now tab of the TUI.
 
 The cuts and timings live under "guard" in config.json. See:
 clusage help guard-config
 `,
 
+	"guard": `Usage:
+  clusage guard off
+  clusage guard on
+  clusage guard status
+
+Turns the guard rail off for every Claude Code session, or back on. Off creates
+~/.claude/clusage-guard.off, and on removes it. A denied agent cannot run this
+itself, so a deny names these commands for you to run.
+`,
+
 	"guard-config": `Usage:
   clusage guard-config
 
-Prints the guard rail settings as key=value lines. The hook script reads this,
-so you only need it to check what the hook will apply.
+Prints the guard rail settings as key=value lines, after the config file and
+the environment. Use it to check what the hook will apply.
 
 Keys, from "guard" in ~/.config/clusage/config.json:
   soft_5h        pause at this 5h percent (soft_5h_percent, default 90)

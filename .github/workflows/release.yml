@@ -9,8 +9,9 @@ permissions:
   contents: write # required to create the release and upload assets
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  # The guard rail hook runs on Windows too, so the tests run there as well.
+  test-windows:
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -23,8 +24,20 @@ jobs:
       - name: Test
         run: go test ./...
 
-      - name: Test the guard rail hook
-        run: bash hooks/clusage-guard.test.sh
+  release:
+    needs: test-windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
 
       - name: Build artifacts
         env:

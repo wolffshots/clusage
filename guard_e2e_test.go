@@ -11,26 +11,19 @@ import (
 	"testing"
 )
 
-// TestGuardHookEndToEnd runs the real guard rail script against a clusage built
-// from this tree and a fake API. The fixture tests cover the decisions. This
+// TestGuardHookEndToEnd runs clusage hook run from a binary built from this
+// tree against a fake API. The fixture tests cover the decisions. This
 // covers the path from an HTTP status to the deny text the agent reads.
 func TestGuardHookEndToEnd(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the binary")
-	}
-	if runtime.GOOS == "windows" {
-		t.Skip("the hook is a bash script, and Claude Code runs it on macOS and Linux")
-	}
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("no bash on PATH")
 	}
 	goBin, err := exec.LookPath("go")
 	if err != nil {
 		t.Skip("no go on PATH")
 	}
 	bin := t.TempDir()
-	if out, err := exec.Command(goBin, "build", "-o", filepath.Join(bin, "clusage"), ".").CombinedOutput(); err != nil {
+	if out, err := exec.Command(goBin, "build", "-o", filepath.Join(bin, "clusage"+exeSuffix), ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
 
@@ -49,9 +42,8 @@ func TestGuardHookEndToEnd(t *testing.T) {
 			[]byte(`{"source": "usage", "fallback": "probe"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		cmd := exec.Command(bash, filepath.Join("hooks", hookScriptName))
+		cmd := exec.Command(filepath.Join(bin, "clusage"+exeSuffix), "hook", "run")
 		cmd.Env = append(os.Environ(),
-			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 			"XDG_CONFIG_HOME="+filepath.Join(dir, "config"),
 			"CLAUDE_CONFIG_DIR="+filepath.Join(dir, "claude"),
 			"CLUSAGE_GUARD_STATE="+filepath.Join(dir, "stamp"),
@@ -87,3 +79,6 @@ func TestGuardHookEndToEnd(t *testing.T) {
 		t.Errorf("401: want a deny that names the fix, got %s", out)
 	}
 }
+
+// exeSuffix is the extension go build gives a binary on this platform.
+var exeSuffix = map[bool]string{true: ".exe"}[runtime.GOOS == "windows"]
