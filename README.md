@@ -438,6 +438,7 @@ before each tool call:
 | 5h window still high after 45s | Deny the call, and tell the agent when to retry. |
 | Any 7d window at or above 95% | Deny the call at once. No polling. |
 | The tool is a scheduling tool | Allow the call, so the agent can book its retry. |
+| The tool reads or writes the handoff file | Allow the call while no window is exhausted, so the agent can leave its state for a fresh session. |
 | `clusage` reports no usable window | Deny the call at once. No polling. |
 
 A deny names the window, its percent, and its reset clock time. It then tells
@@ -581,6 +582,31 @@ An unknown or falling rate contributes nothing, so the ramp decides on its own.
 Run `clusage hook project <percent> <rate> <cut>` to print the wait for any
 triple.
 
+### The handoff file
+
+A deny at the 5h soft limit or the 7d hard cut offers a fourth option beside
+wait, pay overage and stop: write the current state to a handoff file, then
+stop. A fresh session picks the work up from that file, so nothing in the
+denied session's context is lost when you walk away from it.
+
+The file is `HANDOFF.md` in the session's working directory. Set
+`handoff_file` to move it, or to `off` to drop the option. The deny tells the
+agent how to write it:
+
+- The guard lets `Read`, `Write`, `Edit` and `MultiEdit` through for that one
+  path, and nothing else. The agent writes from what the session already
+  knows, and runs no git, build or test to gather more.
+- The file is markdown for an agent with no context: the goal in your words,
+  what is done and whether it is committed and pushed, where the work stopped,
+  the next steps as a checklist, decisions and dead ends, open questions, and
+  the commands that build and test the work.
+- The agent then tells you the path, and that a fresh session resumes with
+  `read HANDOFF.md and continue from its next steps`.
+
+The handoff never cuts into overage. It spends what is left of a window below
+its limit, so an exhausted window leaves the option out of the deny and denies
+the write itself, even with `CLUSAGE_GUARD_ALLOW_OVERAGE=1` set.
+
 ### Guard rail settings
 
 Every setting has a field in the `guard` section of `config.json` and an
@@ -598,6 +624,7 @@ default in the table.
 | `max_wait_seconds` | `CLUSAGE_GUARD_MAXWAIT` | `45` | Deny after pausing this long. |
 | `allow_overage` | `CLUSAGE_GUARD_ALLOW_OVERAGE` | `false` | Set to `1` to keep working once a window is exhausted. |
 | `allow_tools` | `CLUSAGE_GUARD_ALLOW_TOOLS` | `ScheduleWakeup CronCreate AskUserQuestion` | Tool names that pass without a check. |
+| `handoff_file` | `CLUSAGE_GUARD_HANDOFF` | `HANDOFF.md` | The file a denied agent may write its state to. Relative to the session's working directory. `off` drops the option. |
 
 The switches below have no config field. Two of them turn a feature off, which
 is what the off switch file below is for, and two exist for the test suite.
@@ -622,6 +649,7 @@ poll=15
 maxwait=45
 allow_overage=0
 allow_tools=ScheduleWakeup CronCreate AskUserQuestion
+handoff_file=HANDOFF.md
 ```
 
 The Config tab reports the same numbers, and marks the rows an environment

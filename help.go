@@ -235,6 +235,9 @@ Keys, from "guard" in ~/.config/clusage/config.json:
   maxwait        seconds to pause before a deny (default 45)
   allow_overage  1 keeps working once a window is exhausted (default 0)
   allow_tools    tools that always pass
+  handoff_file   the file a denied agent may write its state to, for a
+                 fresh session to resume from (default HANDOFF.md, off
+                 drops the option)
 
 A CLUSAGE_GUARD_* environment variable overrides the file for one session.
 Values out of range fall back to the default.

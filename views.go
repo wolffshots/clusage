@@ -603,6 +603,7 @@ func (m model) configView() string {
 		[2]string{"max wait", val(itoa(g.MaxWait)+"s, then deny") +
 			dimStyle.Render("   overage ") + overageLabel(g.AllowOverage)},
 		[2]string{"allow tools", val(strings.Join(g.AllowTools, ", "))},
+		[2]string{"handoff file", val(g.Handoff)},
 		[2]string{"hook", hookLabel(m.guard)},
 	), frameW) + "\n")
 

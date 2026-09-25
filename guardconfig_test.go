@@ -74,11 +74,11 @@ func TestWriteGuardConfig(t *testing.T) {
 	var b strings.Builder
 	if err := writeGuardConfig(&b, Guard{Soft5h: 95, Hard7d: 97, Interval: 300,
 		IntervalMin: 30, Poll: 15, MaxWait: 45, AllowOverage: true,
-		AllowTools: []string{"One", "Two"}}); err != nil {
+		AllowTools: []string{"One", "Two"}, Handoff: "HANDOFF.md"}); err != nil {
 		t.Fatal(err)
 	}
 	want := "soft_5h=95\nhard_7d=97\ninterval=300\ninterval_min=30\n" +
-		"poll=15\nmaxwait=45\nallow_overage=1\nallow_tools=One Two\n"
+		"poll=15\nmaxwait=45\nallow_overage=1\nallow_tools=One Two\nhandoff_file=HANDOFF.md\n"
 	if b.String() != want {
 		t.Errorf("got:\n%s\nwant:\n%s", b.String(), want)
 	}
@@ -110,7 +110,7 @@ func TestDefaultConfigFileIsComplete(t *testing.T) {
 	guard, _ := got["guard"].(map[string]any)
 	for _, key := range []string{"soft_5h_percent", "hard_7d_percent",
 		"interval_seconds", "interval_min_seconds", "poll_seconds",
-		"max_wait_seconds", "allow_overage", "allow_tools"} {
+		"max_wait_seconds", "allow_overage", "allow_tools", "handoff_file"} {
 		if _, ok := guard[key]; !ok {
 			t.Errorf("the default guard section has no %q", key)
 		}

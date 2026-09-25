@@ -44,7 +44,7 @@ func guardEnv(t *testing.T) (dir string) {
 	t.Setenv("CLUSAGE_GUARD_MAXWAIT", "2")
 	for _, k := range []string{"CLUSAGE_GUARD_DISABLE", "CLUSAGE_RESUME_DISABLE", "CLUSAGE_GUARD_5H",
 		"CLUSAGE_GUARD_7D", "CLUSAGE_GUARD_INTERVAL", "CLUSAGE_GUARD_INTERVAL_MIN",
-		"CLUSAGE_GUARD_ALLOW_OVERAGE", "CLUSAGE_GUARD_ALLOW_TOOLS"} {
+		"CLUSAGE_GUARD_ALLOW_OVERAGE", "CLUSAGE_GUARD_ALLOW_TOOLS", "CLUSAGE_GUARD_HANDOFF"} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
@@ -52,6 +52,18 @@ func guardEnv(t *testing.T) (dir string) {
 	guardSleep = func(time.Duration) {}
 	t.Cleanup(func() { guardSleep = old })
 	return dir
+}
+
+// cwdFor returns a function that puts a session directory under dir in place
+// of CWD, JSON escaped the way both the payload and the deny carry it, so the
+// cases read the same on Windows.
+func cwdFor(dir string) func(string) string {
+	work := filepath.Join(dir, "work")
+	esc := strings.Trim(encodeJSON(work+string(filepath.Separator)), "\"\n")
+	return func(s string) string {
+		s = strings.ReplaceAll(s, "CWD/", esc)
+		return strings.ReplaceAll(s, "CWD", strings.Trim(encodeJSON(work), "\"\n"))
+	}
 }
 
 // runGuard writes the fixture, clears the stamp, and runs one hook event.
@@ -110,7 +122,25 @@ func TestGuardDecisions(t *testing.T) {
 		{"multiple choice", fxHigh5, "", "multiple choice question"},
 		{"overage option", fxHigh5, "", "keep working now and pay overage"},
 		{"timer only on wait", fxHigh5, "", "only if the user picks"},
-		{"no reset question", fxHigh7, "", "ask whether to stop here or keep working and pay overage"},
+		{"no reset question", fxHigh7, "", "ask whether to write the current state to a handoff file and stop, keep working and pay overage, or stop here"},
+		{"trend rate", fxHigh5Rate, "", "rising at 12.0%/h"},
+		{"trend fill", fxHigh5Rate, "", "fills in about 30m"},
+		{"ask first", fxHigh5, "", "Do not schedule a resume before the user answers"},
+		{"multiple choice", fxHigh5, "", "multiple choice question"},
+		{"overage option", fxHigh5, "", "keep working now and pay overage"},
+		{"timer only on wait", fxHigh5, "", "only if the user picks"},
+		{"no reset question", fxHigh7, "", "ask whether to write the current state to a handoff file and stop, keep working and pay overage, or stop here"},
+		{"handoff option", fxHigh5, "", "write the current state to a handoff file so a fresh session can resume from it and stop"},
+		{"handoff steps", fxHigh5, `{"tool_name":"Bash","cwd":"CWD"}`, "lets Read, Write and Edit through for one file only: CWD/HANDOFF.md"},
+		{"handoff resume", fxHigh5, `{"tool_name":"Bash","cwd":"CWD"}`, "read CWD/HANDOFF.md and continue from its next steps"},
+		{"handoff 7d", fxHigh7, "", "handoff file"},
+		{"handoff other file", fxHigh5, `{"tool_name":"Write","cwd":"CWD","tool_input":{"file_path":"CWD/main.go"}}`, "5h limit is at 94%"},
+		{"handoff pass", fxHigh5, `{"tool_name":"Write","cwd":"CWD","tool_input":{"file_path":"CWD/HANDOFF.md"}}`, ""},
+		{"handoff read", fxHigh7, `{"tool_name":"Read","cwd":"CWD","tool_input":{"file_path":"CWD/HANDOFF.md"}}`, ""},
+		{"handoff relative", fxHigh5, `{"tool_name":"Edit","cwd":"CWD","tool_input":{"file_path":"HANDOFF.md"}}`, ""},
+		{"handoff bash", fxHigh5, `{"tool_name":"Bash","cwd":"CWD","tool_input":{"file_path":"CWD/HANDOFF.md"}}`, "5h limit is at 94%"},
+		{"handoff spent", fxBurned, `{"tool_name":"Write","cwd":"CWD","tool_input":{"file_path":"CWD/HANDOFF.md"}}`, "5h window is exhausted (status rejected)"},
+		{"handoff nodata", "", `{"tool_name":"Write","cwd":"CWD","tool_input":{"file_path":"CWD/HANDOFF.md"}}`, "no usable rate limit window"},
 		{"no reset decide", fxHigh7, "", "Do not decide it yourself"},
 		{"allow list 5h", fxHigh5, "", "still allows these tools"},
 		{"allow list names", fxHigh5, "", "AskUserQuestion"},
@@ -127,8 +157,9 @@ func TestGuardDecisions(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			guardEnv(t)
-			out, _ := runGuard(t, c.fixture, c.payload)
+			cwd := cwdFor(guardEnv(t))
+			out, _ := runGuard(t, c.fixture, cwd(c.payload))
+			c.want = cwd(c.want)
 			if c.want == "" {
 				if out != "" {
 					t.Fatalf("want allow, got %s", out)
@@ -155,6 +186,7 @@ func TestGuardTextAbsent(t *testing.T) {
 	cases := []struct{ name, fixture, not string }{
 		{"no rate, no trend", fxHigh5, "rising at"},
 		{"no reset, no legs", fxHigh7, "read the leg number from that message"},
+		{"spent, no handoff", fxBurned, "handoff"},
 	}
 	for _, c := range cases {
 		guardEnv(t)
@@ -169,6 +201,39 @@ func TestGuardOverageOptIn(t *testing.T) {
 	t.Setenv("CLUSAGE_GUARD_ALLOW_OVERAGE", "1")
 	if out, _ := runGuard(t, fxBurned, ""); !strings.Contains(out, "5h limit is at 100% and did not drop") {
 		t.Fatalf("overage opt-in, got %s", out)
+	}
+}
+
+// On overage the handoff drops out of the deny, and its write is denied,
+// because overage would pay for it.
+func TestGuardHandoffNeverOnOverage(t *testing.T) {
+	cwd := cwdFor(guardEnv(t))
+	t.Setenv("CLUSAGE_GUARD_ALLOW_OVERAGE", "1")
+	if out, _ := runGuard(t, fxBurned, ""); !strings.Contains(out, "did not drop") || strings.Contains(out, "handoff") {
+		t.Fatalf("an exhausted window offered the handoff: %s", out)
+	}
+	out, _ := runGuard(t, fxBurned, cwd(`{"tool_name":"Write","cwd":"CWD","tool_input":{"file_path":"CWD/HANDOFF.md"}}`))
+	if !strings.Contains(out, "overage would pay for the handoff file") {
+		t.Fatalf("the handoff write passed on overage: %s", out)
+	}
+}
+
+// The handoff file follows the setting, and "off" drops the option.
+func TestGuardHandoffSetting(t *testing.T) {
+	cwd := cwdFor(guardEnv(t))
+	t.Setenv("CLUSAGE_GUARD_HANDOFF", "next.md")
+	if out, _ := runGuard(t, fxHigh5, cwd(`{"tool_name":"Bash","cwd":"CWD"}`)); !strings.Contains(out, cwd("CWD/next.md")) {
+		t.Fatalf("the setting did not name the file: %s", out)
+	}
+	if out, _ := runGuard(t, fxHigh5, cwd(`{"tool_name":"Write","cwd":"CWD","tool_input":{"file_path":"CWD/next.md"}}`)); out != "" {
+		t.Fatalf("the configured file was denied: %s", out)
+	}
+	t.Setenv("CLUSAGE_GUARD_HANDOFF", "off")
+	if out, _ := runGuard(t, fxHigh5, ""); strings.Contains(out, "handoff") || !strings.Contains(out, "Offer three options") {
+		t.Fatalf("off still offered the handoff: %s", out)
+	}
+	if out, _ := runGuard(t, fxHigh5, cwd(`{"tool_name":"Write","cwd":"CWD","tool_input":{"file_path":"CWD/HANDOFF.md"}}`)); out == "" {
+		t.Fatal("off still let the handoff write through")
 	}
 }
 
