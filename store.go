@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -71,6 +72,11 @@ type Guard struct {
 	// AllowTools names the tools that pass without a check. An empty list
 	// reads as unset, because the hook cannot express one either.
 	AllowTools []string `json:"allow_tools"`
+	// Handoff is the file a denied agent may still read and write, to leave
+	// its state for a fresh session, when no router doc names one. A relative
+	// path is from the session's working directory, "off" drops the option,
+	// and an empty value reads as unset.
+	Handoff string `json:"handoff_file"`
 }
 
 var defaultConfig = Config{
@@ -87,6 +93,7 @@ var defaultConfig = Config{
 		MaxWait:      45,
 		AllowOverage: false,
 		AllowTools:   []string{"ScheduleWakeup", "CronCreate", "AskUserQuestion"},
+		Handoff:      "HANDOFF.md",
 	},
 }
 
@@ -142,6 +149,9 @@ func loadConfig() (Config, string, error) {
 		return Config{}, path, err
 	}
 	cfg := defaultConfig
+	// Unmarshal fills a slice in place, so a copy keeps a file's allow_tools
+	// from overwriting the defaults every later read falls back to.
+	cfg.Guard.AllowTools = slices.Clone(defaultConfig.Guard.AllowTools)
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return Config{}, path, fmt.Errorf("parse %s: %w", path, err)
 	}
@@ -186,6 +196,9 @@ func (g *Guard) normalize() {
 	}
 	if len(g.AllowTools) == 0 {
 		g.AllowTools = d.AllowTools
+	}
+	if strings.TrimSpace(g.Handoff) == "" {
+		g.Handoff = d.Handoff
 	}
 }
 

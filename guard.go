@@ -329,6 +329,9 @@ func verdict(rows []usageRow, g Guard) decision {
 type guardRail struct {
 	g      Guard
 	stderr io.Writer
+	// handoff is where this session's handoff goes, nil when the option is
+	// off.
+	handoff *handoffPlan
 }
 
 // deny renders a PreToolUse deny. Every deny names the tools that still pass,
@@ -379,12 +382,22 @@ const overage = "If the user picks overage, the guard has to stand down first, a
 
 // retry tells the caller what to do about the wait. It never tells the agent
 // to park itself. A wait of hours is the user's decision, so the agent asks
-// and waits for an answer.
-func retry(window, reset string) string {
+// and waits for an answer. handoff says how to write the handoff, and ""
+// leaves that option out.
+func retry(window, reset, handoff string) string {
 	if reset == "" {
-		return "The " + window + " window reported no reset time, so there is nothing to wait for. Stop all work now, in this agent and in every subagent. Report the limit to the user, and ask whether to stop here or keep working and pay overage. Wait for the answer. Do not decide it yourself. " + overage
+		if handoff == "" {
+			return "The " + window + " window reported no reset time, so there is nothing to wait for. Stop all work now, in this agent and in every subagent. Report the limit to the user, and ask whether to stop here or keep working and pay overage. Wait for the answer. Do not decide it yourself. " + overage
+		}
+		return "The " + window + " window reported no reset time, so there is nothing to wait for. Stop all work now, in this agent and in every subagent. Report the limit to the user, and ask whether to write the current state to a handoff file and stop, keep working and pay overage, or stop here. Wait for the answer. Do not decide it yourself. " + handoff + " " + overage
 	}
-	return "It " + reset + ". Stop all other work now, in this agent and in every subagent. Do not run clusage again to check it, and trust that time. Do not schedule a resume before the user answers. Ask the user first, as a short multiple choice question, and wait for the answer. Offer three options: wait for the reset and resume then, keep working now and pay overage, or stop here. Set a timer or a wake-up only if the user picks the first option. If the user waits, chain the wake-ups. A wake-up caps at one hour, and a gap over 55 minutes expires the prompt cache. Use legs of 55 minutes or less. Put the leg number, the total, and the reset time into the message the wake-up delivers back to you. On waking, read the leg number from that message. On an interim leg, schedule the next leg and do nothing else. Then end the turn. Never call a tool to check the clock, because a tool call can be denied. " + overage
+	options := "Offer three options: wait for the reset and resume then, keep working now and pay overage, or stop here."
+	steps := ""
+	if handoff != "" {
+		options = "Offer four options: wait for the reset and resume then, write the current state to a handoff file so a fresh session can resume from it and stop, keep working now and pay overage, or stop here."
+		steps = " " + handoff
+	}
+	return "It " + reset + ". Stop all other work now, in this agent and in every subagent. Do not run clusage again to check it, and trust that time. Do not schedule a resume before the user answers. Ask the user first, as a short multiple choice question, and wait for the answer. " + options + " Set a timer or a wake-up only if the user picks the first option. If the user waits, chain the wake-ups. A wake-up caps at one hour, and a gap over 55 minutes expires the prompt cache. Use legs of 55 minutes or less. Put the leg number, the total, and the reset time into the message the wake-up delivers back to you. On waking, read the leg number from that message. On an interim leg, schedule the next leg and do nothing else. Then end the turn. Never call a tool to check the clock, because a tool call can be denied." + steps + " " + overage
 }
 
 // stop denies a call that overage would pay for.
@@ -407,13 +420,42 @@ func (gr guardRail) nodata(reason string) string {
 
 func (gr guardRail) hard(d decision) string {
 	return gr.deny(fmt.Sprintf("clusage guard rail: the 7d limit is at %s%% (hard cut at %d%%).%s %s",
-		fmtNum(d.w.pct), gr.g.Hard7d, trend(d.w.pct, d.seven.rate), retry("7d", d.w.reset)))
+		fmtNum(d.w.pct), gr.g.Hard7d, trend(d.w.pct, d.seven.rate), retry("7d", d.w.reset, gr.offerHandoff(d))))
 }
 
 func (gr guardRail) soft(d decision) string {
 	return gr.deny(fmt.Sprintf("clusage guard rail: the 5h limit is at %s%% and did not drop in %ds (soft limit %d%%).%s %s",
-		fmtNum(d.w.pct), gr.g.MaxWait, gr.g.Soft5h, trend(d.w.pct, d.five.rate), retry("5h", d.w.reset)))
+		fmtNum(d.w.pct), gr.g.MaxWait, gr.g.Soft5h, trend(d.w.pct, d.five.rate), retry("5h", d.w.reset, gr.offerHandoff(d))))
 }
+
+// offerHandoff is how a deny offers the handoff, or "". An exhausted window
+// means overage would pay for the write, which happens when the user opted in
+// to overage, so the option drops out then.
+func (gr guardRail) offerHandoff(d decision) string {
+	if gr.handoff == nil || exhausted(d.five) || exhausted(d.seven) {
+		return ""
+	}
+	return gr.handoff.steps()
+}
+
+// exhausted reports whether a window's status says its quota is spent.
+func exhausted(w usageRow) bool {
+	return w.status != "" && !strings.HasPrefix(w.status, "allowed")
+}
+
+// handoffDeny denies a handoff write the guard would otherwise pass, because a
+// window is exhausted and the write would be paid for by overage.
+func (gr guardRail) handoffDeny(d decision) string {
+	w := d.five
+	if !exhausted(w) {
+		w = d.seven
+	}
+	return gr.deny("clusage guard rail: the " + w.name + " window is exhausted (status " + w.status + "), so overage would pay for the handoff file, and the guard keeps it for when budget is left. Stop all work now, in this agent and in every subagent. Tell the user the window is exhausted and end the turn. " + overage)
+}
+
+// handoffTools are the tools that may touch the handoff file. Write refuses
+// to replace a file it has not read, so Read is on the list.
+var handoffTools = []string{"Read", "Write", "Edit", "MultiEdit"}
 
 // ---- the hook ------------------------------------------------------------------
 
@@ -514,11 +556,24 @@ func (gr guardRail) check(payload []byte) string {
 	}
 
 	var p struct {
-		ToolName string `json:"tool_name"`
+		ToolName  string    `json:"tool_name"`
+		Cwd       string    `json:"cwd"`
+		ToolInput toolInput `json:"tool_input"`
 	}
 	_ = json.Unmarshal(payload, &p)
 	if p.ToolName != "" && slices.Contains(g.AllowTools, p.ToolName) {
 		return ""
+	}
+	gr.handoff = planHandoff(g.Handoff, p.Cwd)
+	target := ""
+	if gr.handoff != nil && slices.Contains(handoffTools, p.ToolName) && p.ToolInput.FilePath != "" {
+		f := p.ToolInput.FilePath
+		if !filepath.IsAbs(f) && p.Cwd != "" {
+			f = filepath.Join(p.Cwd, f)
+		}
+		if gr.handoff.allows(p.ToolName, f, p.ToolInput) {
+			target = filepath.Clean(f)
+		}
 	}
 
 	// A probe older than the wait it just sized would report a stale number,
@@ -531,6 +586,22 @@ func (gr guardRail) check(payload []byte) string {
 		return d
 	}
 	d := judge(interval / 60)
+	// The handoff file passes at any cut, so the agent can leave its state for
+	// a fresh session. It never passes on overage.
+	if target != "" {
+		switch {
+		case d.verdict == "NODATA":
+			return gr.nodata(d.reason)
+		case exhausted(d.five) || exhausted(d.seven):
+			return gr.handoffDeny(d)
+		case d.verdict == "OK":
+			mark(state, d)
+		}
+		if p.ToolName != "Read" && gr.handoff.excludes(target) {
+			excludeHandoff(target)
+		}
+		return ""
+	}
 	for waited := 0; ; {
 		switch d.verdict {
 		case "NODATA":

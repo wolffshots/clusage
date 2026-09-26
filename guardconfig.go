@@ -21,6 +21,7 @@ const (
 	envMaxWait      = "CLUSAGE_GUARD_MAXWAIT"
 	envAllowOverage = "CLUSAGE_GUARD_ALLOW_OVERAGE"
 	envAllowTools   = "CLUSAGE_GUARD_ALLOW_TOOLS"
+	envHandoff      = "CLUSAGE_GUARD_HANDOFF"
 )
 
 // guardConfig prints the guard settings the hook applies, as "key=value" lines:
@@ -49,6 +50,7 @@ func writeGuardConfig(w io.Writer, g Guard) error {
 		{"maxwait", strconv.Itoa(g.MaxWait)},
 		{"allow_overage", strconv.Itoa(overage)},
 		{"allow_tools", strings.Join(g.AllowTools, " ")},
+		{"handoff_file", g.Handoff},
 	} {
 		if _, err := fmt.Fprintf(w, "%s=%s\n", kv[0], kv[1]); err != nil {
 			return err
@@ -117,6 +119,10 @@ func effectiveGuard(g Guard) (Guard, []string) {
 	note(name)
 	g.AllowTools, name = guardText(envAllowTools, g.AllowTools)
 	note(name)
+	if v := strings.TrimSpace(os.Getenv(envHandoff)); v != "" {
+		g.Handoff = v
+		note(envHandoff)
+	}
 	// A bad override falls through to the file, so normalize here rather than
 	// trust the variable.
 	g.normalize()

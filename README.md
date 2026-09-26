@@ -359,8 +359,8 @@ There is no cache header on the response; the body is the only place these
 counts appear.
 
 **Config** shows the effective settings, the failed reads of the last 24 hours
-by source and status, whether each schedule parses, and when it next fires. It also reports the guard rail thresholds the
-hook would apply, and marks a row an environment variable overrode. Last come
+by source and status, whether each schedule parses, and when it next fires. It also reports the guard rail thresholds and
+the handoff file the hook would apply, and marks a row an environment variable overrode. Last come
 the config and database paths, whether a token is stored, and the version.
 
 **Diagnostics** only shows when `"diagnostics": true` is set in `config.json`.
@@ -435,15 +435,26 @@ before each tool call:
 |---|---|
 | A 5h or 7d window is exhausted | Deny the call at once. Overage is paying, so a retry only spends more. |
 | 5h window at or above 90% | Pause the tool call. Poll every 15s. Release the call once the window drops below 90%. |
-| 5h window still high after 45s | Deny the call, and tell the agent when to retry. |
+| 5h window still high after 45s | Deny the call, and have the agent ask you how to go on. |
 | Any 7d window at or above 95% | Deny the call at once. No polling. |
 | The tool is a scheduling tool | Allow the call, so the agent can book its retry. |
+| The tool reads or writes the [handoff file](#the-handoff-file) | Allow the call while no window is exhausted, so the agent can leave its state for a fresh session. |
 | `clusage` reports no usable window | Deny the call at once. No polling. |
 
-A deny names the window, its percent, and its reset clock time. It then tells
-the agent to set a timer or a wake-up for that time and to retry then, without
-running `clusage` again to check. Where the window reports no reset time, the
-deny tells the agent to stop and report to the user instead.
+A deny at the 5h soft limit or the 7d hard cut names the window, its percent,
+and its reset clock time. It then tells the agent to stop and put a multiple
+choice question to you, with these options:
+
+1. Wait for the reset and resume then. The agent books a wake-up for the
+   reset time, without running `clusage` again to check.
+2. Write the current state to a handoff file and stop, so a fresh session can
+   resume from it. See [The handoff file](#the-handoff-file).
+3. Keep working now and pay overage. See the off switch below.
+4. Stop here.
+
+Where the window reports no reset time, there is nothing to wait for, so the
+first option drops out. The handoff drops out once a window is exhausted,
+because overage would pay for it.
 
 The last row denies when the guard cannot read a number, rather than assuming
 there is room. That covers a missing
@@ -461,7 +472,7 @@ matters more here than anywhere else, because a broken probe otherwise denies
 every tool call, including the ones needed to diagnose it.
 
 A deny never parks the agent on its own. It asks you first, and it only sets a
-wake-up if you say to wait. A wait longer than 55 minutes is chained into legs,
+wake-up if you pick the first option. A wait longer than 55 minutes is chained into legs,
 because a wake-up caps at one hour and a longer gap expires the prompt cache.
 Each interim leg schedules the next one and does nothing else, so a long wait
 costs almost no tokens.
@@ -581,6 +592,125 @@ An unknown or falling rate contributes nothing, so the ramp decides on its own.
 Run `clusage hook project <percent> <rate> <cut>` to print the wait for any
 triple.
 
+### The handoff file
+
+A deny at the 5h soft limit or the 7d hard cut offers a fourth option beside
+wait, pay overage and stop: write the current state to a handoff file, then
+stop. A fresh session picks the work up from that file, so nothing in the
+denied session's context is lost when you walk away from it.
+
+The deny tells the agent how to write it:
+
+- The guard lets `Read`, `Write`, `Edit` and `MultiEdit` through for the
+  handoff, and nothing else. The agent writes from what the session already
+  knows, and runs no git, build or test to gather more.
+- The file is markdown for an agent with no context: the goal in your words,
+  what is done and whether it is committed and pushed, where the work stopped,
+  the next steps as a checklist, decisions and dead ends, open questions, and
+  the commands that build and test the work.
+- The agent then tells you the path, and that a fresh session resumes with
+  `read <path> and continue from its next steps`.
+
+#### Where it goes
+
+A project can keep a handoff per piece of work, indexed like any other work
+tracker. Name the location in a router doc, the always-loaded file that
+router-reference-docs lays out, as a row that mentions a handoff or next steps
+and gives a backticked markdown path:
+
+```markdown
+| Read this | When |
+|---|---|
+| `docs/work/<work>.md` | Handoff and next steps for one piece of work. Index: `docs/work/README.md` |
+```
+
+The path has to end in `.md`, or in `/` for a tracker directory, so a line
+such as "next steps: run `go test ./...`" does not count. The guard looks for
+the row in this order, and the first one wins:
+
+1. `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md` and `AGENTS.md` in the
+   session's working directory, then in each directory above it up to the
+   repository root.
+2. The same files in your Claude folder (`~/.claude`, or
+   `CLAUDE_CONFIG_DIR`). A path there such as `work/{project}/{work}.md`
+   keeps every project's handoffs out of the projects themselves.
+3. No row anywhere: the agent asks you first. See
+   [When no row is set up](#when-no-row-is-set-up).
+
+A path is relative to the router that names it, and `~/` is your home
+directory. A placeholder such as `<work>` or `{slug}` makes the path a
+tracker: the guard then lets the agent write any markdown file under the
+directory above the first placeholder, so it can add a file for this piece of
+work and update the index beside it. A path ending in `/` is a tracker
+directory. Keep the index inside that directory, because the router itself is
+not the agent's to edit. The deny quotes the row, and tells the agent to add the new file to the index
+as a trigger row, the way router-reference-docs writes a References table.
+
+To keep every project's handoffs in one place, outside the projects, put the
+row in `~/.claude/CLAUDE.md`:
+
+```markdown
+## References
+
+| Read this | When |
+|---|---|
+| `work/{project}/{work}.md` | Handoff and next steps for one piece of work in a project. Index: `work/{project}/README.md` |
+```
+
+A project that names its own location still wins over that row.
+
+Set `handoff_file` to `off` to drop the option everywhere.
+
+#### When no row is set up
+
+A team repository's `CLAUDE.md` or `AGENTS.md` is shared, and a row the agent
+adds there goes out with the next push. So with no handoff row in any router,
+the agent adds none on its own. Once you pick the handoff, it asks a second
+multiple choice question, where the handoff goes:
+
+1. `HANDOFF.md` in the working directory, the `handoff_file` default. It is
+   local, kept out of git, and no router changes.
+2. A tracker for this project only: a handoff row in `CLAUDE.local.md` at the
+   repository root. That file is personal, and the guard keeps it out of git.
+3. A tracker for every project: a handoff row in `~/.claude/CLAUDE.md`.
+4. A tracker the team shares: a handoff row in the project's `CLAUDE.md` or
+   `AGENTS.md`, which the next push shares with the team.
+
+Name another place instead, and the agent records it as a row in
+`CLAUDE.local.md` for a place inside the project, or in `~/.claude/CLAUDE.md`
+for a place outside it.
+
+The guard enforces this, whatever the agent does. A write to any router doc
+the session loads passes only when it keeps every line already there and adds
+a handoff row. Any other change to a router is denied. The guard reads the routers again on each call, so
+once the row is in, the next write goes to the tracker it names.
+
+#### Resume in a fresh session
+
+Start a new Claude Code session in the same directory and tell it:
+
+```text
+read docs/work/login-fix.md and continue from its next steps
+```
+
+The agent names the exact path when it finishes the handoff, so copy it from
+there. A tracker index lists every open piece of work, so a session can also
+start from the index and pick one.
+
+#### It stays out of git
+
+A handoff is local state for the next session, not project history. When the
+agent writes one inside a repository, the guard adds its path to that
+repository's `.git/info/exclude`, which git reads like `.gitignore` but never
+commits. A worktree uses the main checkout's exclude file. The deny also tells
+the agent not to stage or commit it. An exclude only hides untracked files, so
+a tracker you already commit stays tracked. A shared router doc is never
+excluded, but a `CLAUDE.local.md` the agent writes is, because it is personal.
+
+The handoff never cuts into overage. It spends what is left of a window below
+its limit, so an exhausted window leaves the option out of the deny and denies
+the write itself, even with `CLUSAGE_GUARD_ALLOW_OVERAGE=1` set.
+
 ### Guard rail settings
 
 Every setting has a field in the `guard` section of `config.json` and an
@@ -598,6 +728,7 @@ default in the table.
 | `max_wait_seconds` | `CLUSAGE_GUARD_MAXWAIT` | `45` | Deny after pausing this long. |
 | `allow_overage` | `CLUSAGE_GUARD_ALLOW_OVERAGE` | `false` | Set to `1` to keep working once a window is exhausted. |
 | `allow_tools` | `CLUSAGE_GUARD_ALLOW_TOOLS` | `ScheduleWakeup CronCreate AskUserQuestion` | Tool names that pass without a check. |
+| `handoff_file` | `CLUSAGE_GUARD_HANDOFF` | `HANDOFF.md` | The default handoff file the agent offers when no router doc names a location. Relative to the session's working directory. `off` drops the option. |
 
 The switches below have no config field. Two of them turn a feature off, which
 is what the off switch file below is for, and two exist for the test suite.
@@ -622,6 +753,7 @@ poll=15
 maxwait=45
 allow_overage=0
 allow_tools=ScheduleWakeup CronCreate AskUserQuestion
+handoff_file=HANDOFF.md
 ```
 
 The Config tab reports the same numbers, and marks the rows an environment
@@ -707,7 +839,8 @@ starts empty on purpose, so pick one before the first reading:
       "ScheduleWakeup",
       "CronCreate",
       "AskUserQuestion"
-    ]
+    ],
+    "handoff_file": "HANDOFF.md"
   }
 }
 ```
@@ -722,7 +855,7 @@ starts empty on purpose, so pick one before the first reading:
 | `probe_cron` | Schedule for a probe call, whatever `source` is. Empty disables it. |
 | `diagnostics` | Show the Diagnostics tab on key `5`. See [Tabs](#tabs). |
 | `history_hours` | How far back the history graphs may read. |
-| `guard` | The guard rail hook's thresholds. See [Guard rail settings](#guard-rail-settings). |
+| `guard` | The guard rail hook's thresholds and handoff file. See [Guard rail settings](#guard-rail-settings). |
 
 A field you delete falls back to its default. A value out of range does the
 same, so a typo never disables the guard.
