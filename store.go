@@ -202,34 +202,22 @@ func (g *Guard) normalize() {
 	}
 }
 
-// saveToken stores the OAuth token in the login keychain.
-//
-// The token goes in over stdin rather than as a "-w <token>" argument. Command
-// arguments are visible to any local process running ps for as long as the
-// command runs, so an argument would expose the token to every other user on
-// the machine. With -w last it prompts for the value and a confirmation, so the
-// token is written twice.
+// saveToken stores the OAuth token in the OS credential store: Windows
+// Credential Manager on Windows, the login keychain elsewhere.
 func saveToken(token string) error {
 	if strings.ContainsAny(token, "\r\n") {
-		// The prompt reads one line per value. An embedded line break would
-		// store a truncated token and still report success.
+		// A token never has a line break. One would store a truncated token on
+		// macOS, where the prompt reads one line per value.
 		return fmt.Errorf("token contains a line break")
 	}
-	cmd := exec.Command("security", "add-generic-password",
-		"-a", os.Getenv("USER"), "-s", keychainService, "-U", "-w")
-	cmd.Stdin = strings.NewReader(token + "\n" + token + "\n")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("keychain write failed: %s", strings.TrimSpace(string(out)))
-	}
-	return nil
+	return credSave(keychainService, token)
 }
 
 // claudeCodeKeychainService is where Claude Code keeps its login on macOS.
 const claudeCodeKeychainService = "Claude Code-credentials"
 
 // errNoToken is what a token read fails with when no place holds a token.
-var errNoToken = errors.New("no token found: log in with claude, set CLAUDE_CODE_OAUTH_TOKEN, or run clusage setup on macOS. Run clusage help setup for details")
+var errNoToken = errors.New("no token found: log in with claude, set CLAUDE_CODE_OAUTH_TOKEN, or run clusage setup on macOS or Windows. Run clusage help setup for details")
 
 // tokenSource is one place a token can come from. where names it in errors and
 // on the Config tab. load returns "" and no error when the place holds no
@@ -245,7 +233,7 @@ type tokenSource struct {
 // A test replaces the list, because the real one runs the keychain.
 var tokenSources = []tokenSource{
 	{"CLAUDE_CODE_OAUTH_TOKEN", func() (string, error) { return os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), nil }},
-	{"the " + keychainService + " keychain entry", func() (string, error) { return keychainPassword(keychainService), nil }},
+	{"the " + keychainService + " " + storeKind + " entry", func() (string, error) { return credPassword(keychainService), nil }},
 	{"the Claude Code login", claudeCodeLoginToken},
 }
 

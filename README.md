@@ -230,13 +230,14 @@ it. Then store it once:
 clusage setup
 ```
 
-The token goes into the login keychain under the service name `clusage`. The
-prompt hides what you type.
+The token goes into the OS credential store under the name `clusage`: the
+login keychain on macOS, Credential Manager on Windows. The prompt hides what
+you type.
 
 Clusage looks for a token in this order:
 
 1. `CLAUDE_CODE_OAUTH_TOKEN` in the environment.
-2. The `clusage` keychain entry, on macOS.
+2. The `clusage` credential store entry, on macOS and Windows.
 3. The Claude Code login. macOS keeps it in the keychain entry
    `Claude Code-credentials`, and macOS asks once to allow clusage to read it.
    Linux and Windows keep it in `~/.claude/.credentials.json`, or in
@@ -247,8 +248,9 @@ Tokens differ in scope. A token from `claude setup-token` can call the API, so
 the `probe` source works with it. It cannot read the usage endpoint, which
 needs the `user:profile` scope that only the Claude Code login carries. When the
 API refuses a token with a 401, or the usage endpoint refuses it for a missing
-scope, clusage tries the next token in the list. So a `clusage` keychain entry
-does not block the `usage` source while a Claude Code login is also present.
+scope, clusage tries the next token in the list. So a `clusage` credential
+store entry does not block the `usage` source while a Claude Code login is
+also present.
 The probe keeps the first token that works.
 
 A token that fails the scope check once is not sent to the usage endpoint

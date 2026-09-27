@@ -15,7 +15,7 @@ Commands:
   tui           Open the dashboard. This is the default with no command.
   usage         Print one line per limit window and exit.
   statusline    Store the numbers Claude Code gives its status line.
-  setup         Store a token in the macOS keychain.
+  setup         Store a token in the OS credential store.
   hook          Run, install, remove or check the guard rail hook.
   guard         Turn the guard rail off or back on.
   guard-config  Print the guard rail settings the hook applies.
@@ -146,13 +146,14 @@ The usage, probe and auto sources need an OAuth token. clusage looks in this
 order, and stops at the first it finds:
 
   1. CLAUDE_CODE_OAUTH_TOKEN in the environment.
-  2. The clusage keychain entry that this command writes (macOS).
+  2. The clusage credential store entry that this command writes: the macOS
+     keychain, or Windows Credential Manager.
   3. The Claude Code login:
        macOS          the "Claude Code-credentials" keychain entry
        Linux/Windows  ~/.claude/.credentials.json, or CLAUDE_CONFIG_DIR
 
 Once claude has logged in, step 3 needs no setup at all. This command is only
-for storing a separate token on macOS:
+for storing a separate token, on macOS or Windows:
 
   claude setup-token   # prints a token, needs a Claude subscription
   clusage setup        # paste it; the prompt hides what you type
@@ -265,7 +266,7 @@ Sections:
   Account and build  subscription, rate limit tier, version and commit
   Database and guard table sizes and the guard rail hook's last check
 
-It reads the keychain, so macOS can ask to allow it once.
+It reads the OS credential store, so macOS can ask to allow it once.
 `,
 
 	"help": `Usage:

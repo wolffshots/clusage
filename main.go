@@ -95,7 +95,7 @@ func setup() error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("token stored in login keychain (service: clusage)")
+	fmt.Printf("token stored in %s (service: %s)\n", storeKind, keychainService)
 	fmt.Println("config:", path)
 	return nil
 }

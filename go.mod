@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/danieljoos/wincred v1.2.3
 	github.com/muesli/termenv v0.16.0
 	golang.org/x/term v0.45.0
 	modernc.org/sqlite v1.57.0
