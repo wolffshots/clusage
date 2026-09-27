@@ -165,8 +165,8 @@ var errNoKeychain = errors.New("no macOS keychain on this platform")
 var tokenLocations = []tokenLocation{
 	{"CLAUDE_CODE_OAUTH_TOKEN", "env CLAUDE_CODE_OAUTH_TOKEN",
 		func() (string, error) { return os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), nil }, false},
-	{"the " + keychainService + " keychain entry", "keychain " + keychainService,
-		keychainRead(keychainService), false},
+	{"the " + keychainService + " " + storeKind + " entry", storeKind + " " + keychainService,
+		func() (string, error) { return credRead(keychainService) }, false},
 	{"the " + claudeCodeKeychainService + " keychain entry", "keychain " + claudeCodeKeychainService,
 		keychainRead(claudeCodeKeychainService), true},
 	{"the Claude Code credentials file", ".credentials.json", credentialsFileRead, true},
@@ -177,8 +177,8 @@ func shortWhere(where string) string {
 	switch where {
 	case "CLAUDE_CODE_OAUTH_TOKEN":
 		return "env"
-	case "the " + keychainService + " keychain entry":
-		return "keychain " + keychainService
+	case "the " + keychainService + " " + storeKind + " entry":
+		return storeKind + " " + keychainService
 	case "the Claude Code login":
 		return "claude login"
 	}
