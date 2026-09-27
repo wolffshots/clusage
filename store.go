@@ -233,8 +233,18 @@ type tokenSource struct {
 // A test replaces the list, because the real one runs the keychain.
 var tokenSources = []tokenSource{
 	{"CLAUDE_CODE_OAUTH_TOKEN", func() (string, error) { return os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), nil }},
-	{"the " + keychainService + " " + storeKind + " entry", func() (string, error) { return credPassword(keychainService), nil }},
+	{"the " + keychainService + " " + storeKind + " entry", storeToken},
 	{"the Claude Code login", claudeCodeLoginToken},
+}
+
+// storeToken reads the entry clusage setup writes. A platform with no store
+// holds no token, which is not a failure.
+func storeToken() (string, error) {
+	t, err := credRead(keychainService)
+	if errors.Is(err, errNoKeychain) {
+		return "", nil
+	}
+	return t, err
 }
 
 // keychainPassword reads one macOS keychain entry, or "" when it is missing.

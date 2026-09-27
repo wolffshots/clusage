@@ -21,6 +21,11 @@ const storeKind = "keychain"
 // the machine. With -w last it prompts for the value and a confirmation, so the
 // token is written twice.
 func credSave(target, token string) error {
+	if _, err := exec.LookPath("security"); err != nil {
+		// Linux has no store clusage writes. Say so, rather than report a
+		// keychain write that failed with no output.
+		return fmt.Errorf("no OS credential store on this platform: set CLAUDE_CODE_OAUTH_TOKEN or log in with claude instead")
+	}
 	cmd := exec.Command("security", "add-generic-password",
 		"-a", os.Getenv("USER"), "-s", target, "-U", "-w")
 	cmd.Stdin = strings.NewReader(token + "\n" + token + "\n")
@@ -31,7 +36,8 @@ func credSave(target, token string) error {
 	return nil
 }
 
-// credPassword reads one keychain entry, or "" when it is missing.
-func credPassword(target string) string {
-	return keychainPassword(target)
+// credRead reads one keychain entry, or "" when it is missing. With no
+// keychain on the platform it fails with errNoKeychain.
+func credRead(target string) (string, error) {
+	return keychainRead(target)()
 }

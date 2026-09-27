@@ -250,3 +250,19 @@ func TestDiagnosticsTab(t *testing.T) {
 		t.Error("scrolled past the end")
 	}
 }
+
+// The store entry's name is built in three places: the token source a trace
+// records, the Diagnostics row, and the short form in the trace tables. They
+// differ by platform through storeKind, so check they still agree.
+func TestStoreEntryNamesAgree(t *testing.T) {
+	src, loc := tokenSources[1], tokenLocations[1]
+	if src.where != loc.where {
+		t.Errorf("token source %q and Diagnostics row %q name the store entry differently", src.where, loc.where)
+	}
+	if got := shortWhere(src.where); got != loc.short {
+		t.Errorf("shortWhere(%q) = %q, want the row's short name %q", src.where, got, loc.short)
+	}
+	if !strings.Contains(src.where, storeKind) {
+		t.Errorf("token source %q does not name the %s", src.where, storeKind)
+	}
+}

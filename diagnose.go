@@ -166,7 +166,7 @@ var tokenLocations = []tokenLocation{
 	{"CLAUDE_CODE_OAUTH_TOKEN", "env CLAUDE_CODE_OAUTH_TOKEN",
 		func() (string, error) { return os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"), nil }, false},
 	{"the " + keychainService + " " + storeKind + " entry", storeKind + " " + keychainService,
-		storeRead(keychainService), false},
+		func() (string, error) { return credRead(keychainService) }, false},
 	{"the " + claudeCodeKeychainService + " keychain entry", "keychain " + claudeCodeKeychainService,
 		keychainRead(claudeCodeKeychainService), true},
 	{"the Claude Code credentials file", ".credentials.json", credentialsFileRead, true},
@@ -183,17 +183,6 @@ func shortWhere(where string) string {
 		return "claude login"
 	}
 	return where
-}
-
-// storeRead reads the OS credential store entry clusage writes. On a platform
-// with no store it reports errNoKeychain, so the row shows n/a, not an error.
-func storeRead(service string) func() (string, error) {
-	return func() (string, error) {
-		if runtime.GOOS == "windows" {
-			return credPassword(service), nil
-		}
-		return keychainRead(service)()
-	}
 }
 
 func keychainRead(service string) func() (string, error) {
