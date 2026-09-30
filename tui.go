@@ -136,6 +136,14 @@ type cronTickMsg struct {
 	seq int
 }
 
+// renderMsg applies the Diagnostics scroll that arrow keys queued since the
+// last frame.
+type renderMsg struct{}
+
+// frameInterval is how often queued scroll steps render. A free-spinning wheel
+// sends thousands of arrow keys a second, far more than a terminal can draw.
+const frameInterval = 16 * time.Millisecond
+
 type model struct {
 	db  *sql.DB
 	cfg Config
@@ -192,6 +200,15 @@ type model struct {
 	// diagOffset is how far that tab is scrolled, in lines.
 	diag       *diagnosis
 	diagOffset int
+	// diagPending is scroll that arrow keys queued for the next frame, and
+	// renderPending is set while that frame's renderMsg is on its way.
+	diagPending   int
+	renderPending bool
+
+	// view holds the last View output. The model is a value, so Update hands
+	// out copies. Each change of state gets a fresh pointer, and a copy never
+	// sees a render of another state.
+	view *string
 
 	width, height int
 }
@@ -223,6 +240,7 @@ func newModel(db *sql.DB, cfg Config, cfgPath string, latest Reading, hasData bo
 		latest:    latest,
 		hasData:   hasData,
 		spanIdx:   1, // 24h
+		view:      new(string),
 	}
 }
 
@@ -363,8 +381,50 @@ func (m model) historySpan() time.Duration {
 	return span
 }
 
+// Update keeps a wheel flood cheap. Bubble Tea calls View after every message,
+// so a message that changes nothing keeps the cached view, and Diagnostics
+// scroll steps collect into one render per frame.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok {
+		if d := scrollStep(k); d != 0 {
+			if m.active != viewDiagnostics {
+				return m, nil // no other tab scrolls
+			}
+			m.diagPending += d
+			if m.renderPending {
+				return m, nil
+			}
+			m.renderPending = true
+			return m, tea.Tick(frameInterval, func(time.Time) tea.Msg { return renderMsg{} })
+		}
+	}
+	// Apply queued scroll before anything else, so a key after it sees it.
+	if m.diagPending != 0 {
+		m.diagOffset = min(max(m.diagOffset+m.diagPending, 0), m.diagMaxOffset())
+		m.diagPending = 0
+	}
+	m.view = new(string)
+	return m.update(msg)
+}
+
+// scrollStep is how far an arrow key scrolls the Diagnostics tab, or 0 for
+// any other key.
+func scrollStep(k tea.KeyMsg) int {
+	switch k.String() {
+	case "up", "k":
+		return -1
+	case "down", "j":
+		return 1
+	}
+	return 0
+}
+
+func (m model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case renderMsg:
+		m.renderPending = false
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.help.Width = msg.Width
@@ -530,10 +590,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// clamps the offset against the content it renders.
 		page := max(m.bodyHeight()-1, 1)
 		switch msg.String() {
-		case "up", "k":
-			m.diagOffset--
-		case "down", "j":
-			m.diagOffset++
 		case "pgup", "b":
 			m.diagOffset -= page
 		case "pgdown", " ", "f":
@@ -543,12 +599,27 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "end", "G":
 			m.diagOffset = len(m.diagnosticsLines())
 		}
-		m.diagOffset = min(max(m.diagOffset, 0), max(len(m.diagnosticsLines())-m.bodyHeight(), 0))
+		m.diagOffset = min(max(m.diagOffset, 0), m.diagMaxOffset())
 	}
 	return m, nil
 }
 
+// diagMaxOffset is the furthest the Diagnostics tab can scroll.
+func (m model) diagMaxOffset() int {
+	return max(len(m.diagnosticsLines())-m.bodyHeight(), 0)
+}
+
 func (m model) View() string {
+	if m.view == nil {
+		return m.render() // a model built without newModel has no cache
+	}
+	if *m.view == "" {
+		*m.view = m.render()
+	}
+	return *m.view
+}
+
+func (m model) render() string {
 	if m.width == 0 {
 		return "loading…"
 	}

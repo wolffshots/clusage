@@ -246,6 +246,7 @@ func TestDiagnosticsTab(t *testing.T) {
 	}
 	before := m.diagOffset
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next, _ = next.Update(renderMsg{})
 	if next.(model).diagOffset != before {
 		t.Error("scrolled past the end")
 	}

@@ -646,3 +646,64 @@ func TestBinToColumns(t *testing.T) {
 		t.Error("a zero column width must pass the series through")
 	}
 }
+
+// A free-spinning wheel sends thousands of arrow keys. A key that changes
+// nothing must reuse the last view, and Diagnostics scroll steps must collect
+// into one render per frame.
+func TestArrowFloodReusesTheView(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	down := tea.KeyMsg{Type: tea.KeyDown}
+	rs := seedReadings(184)
+	cfg := defaultConfig
+	cfg.Diagnostics = true
+	m := newModel(nil, cfg, "/tmp/config.json", rs[len(rs)-1], true)
+	m.history = rs
+	m.width, m.height = 140, 45
+	m.active = viewHistory
+	want := m.View()
+	cache := m.view
+	for range 1000 {
+		next, cmd := m.Update(down)
+		if m = next.(model); cmd != nil {
+			t.Fatal("an arrow key on History returned a command")
+		}
+	}
+	if m.view != cache || m.View() != want {
+		t.Error("an arrow key on History rendered the view again")
+	}
+
+	var lines []string
+	for i := range 60 {
+		lines = append(lines, "line "+itoa(i))
+	}
+	m.diag = &diagnosis{At: time.Now(), Sections: []diagSection{{"Long", lines}}}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
+	m = next.(model)
+	m.View()
+	cache = m.view
+	ticks := 0
+	for _, k := range []tea.KeyMsg{down, down, down, down, down, down, down, {Type: tea.KeyUp}, {Type: tea.KeyRunes, Runes: []rune{'k'}}} {
+		next, cmd := m.Update(k)
+		if m = next.(model); cmd != nil {
+			ticks++
+		}
+	}
+	if ticks != 1 || m.view != cache || m.diagOffset != 0 {
+		t.Errorf("scroll keys armed %d frames, re-rendered %v, moved to %d before the frame",
+			ticks, m.view != cache, m.diagOffset)
+	}
+	next, _ = m.Update(renderMsg{})
+	if m = next.(model); m.diagOffset != 5 || m.view == cache {
+		t.Errorf("the frame scrolled to %d, want 5", m.diagOffset)
+	}
+
+	// Queued scroll lands before the next other message, and clamps once.
+	for range 1000 {
+		next, _ = m.Update(down)
+		m = next.(model)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	if m = next.(model); m.diagOffset != m.diagMaxOffset() || m.diagOffset == 0 {
+		t.Errorf("a tab switch left the offset at %d, want %d", m.diagOffset, m.diagMaxOffset())
+	}
+}
