@@ -687,6 +687,10 @@ the session loads passes only when it keeps every line already there and adds
 a handoff row. Any other change to a router is denied. The guard reads the routers again on each call, so
 once the row is in, the next write goes to the tracker it names.
 
+A router can be a link, the way a dotfile manager keeps `~/.claude/CLAUDE.md`.
+The guard treats the link as the place it is at. A write to the file it points
+to is a write to the router, and a path in a row is relative to the link.
+
 #### Resume in a fresh session
 
 Start a new Claude Code session in the same directory and tell it:

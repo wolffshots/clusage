@@ -218,10 +218,28 @@ func (p *handoffPlan) allows(tool, path string, in toolInput) bool {
 	case p.file != "" && samePath(path, p.file):
 		return true
 	case p.tree != "" && strings.EqualFold(filepath.Ext(path), ".md"):
-		rel, err := filepath.Rel(p.tree, path)
-		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+		return under(p.tree, path) || under(realPath(p.tree), realPath(path))
 	}
 	return false
+}
+
+// under reports whether path is inside dir.
+func under(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// realPath is path with its links resolved. A file that does not exist yet
+// keeps its name under its resolved directory.
+func realPath(path string) string {
+	if r, err := filepath.EvalSymlinks(path); err == nil {
+		return r
+	}
+	dir := filepath.Dir(path)
+	if dir == path {
+		return path
+	}
+	return filepath.Join(realPath(dir), filepath.Base(path))
 }
 
 // isRouter reports whether path is one of the session's router docs.
@@ -277,12 +295,18 @@ func (p *handoffPlan) excludes(path string) bool {
 	return !p.isRouter(path) || strings.EqualFold(filepath.Base(path), "CLAUDE.local.md")
 }
 
-// samePath compares two cleaned paths. Windows file names ignore case.
+// samePath compares two cleaned paths. Windows file names ignore case. A link
+// counts as the place it is at, so the file it points to is the same path. A
+// dotfile manager keeps CLAUDE.md as a link, and the file tools write to the
+// target.
 func samePath(a, b string) bool {
-	if filepath.Separator == '\\' {
-		return strings.EqualFold(a, b)
+	eq := func(a, b string) bool {
+		if filepath.Separator == '\\' {
+			return strings.EqualFold(a, b)
+		}
+		return a == b
 	}
-	return a == b
+	return eq(a, b) || eq(realPath(a), realPath(b))
 }
 
 // steps says how to write the handoff. Every other tool stays denied, so the

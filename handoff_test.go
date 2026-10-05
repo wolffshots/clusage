@@ -147,6 +147,37 @@ func TestHandoffExcludeWorktree(t *testing.T) {
 	}
 }
 
+// A router that is a link, as a dotfile manager keeps it, counts as the place
+// the link is at. A write to its target is a write to the router, and a row in
+// it is relative to the link.
+func TestHandoffLinkedRouter(t *testing.T) {
+	dir := guardEnv(t)
+	target := filepath.Join(dir, "dots", "CLAUDE.md")
+	writeFile(t, target, teamRouter)
+	claude := filepath.Join(dir, "claude")
+	os.MkdirAll(claude, 0o755)
+	if err := os.Symlink(target, filepath.Join(claude, "CLAUDE.md")); err != nil {
+		t.Skip("no symlinks here:", err)
+	}
+	cwd := filepath.Join(dir, "proj")
+	os.MkdirAll(cwd, 0o755)
+
+	if out, _ := runGuard(t, fxHigh5, editPayload(cwd, target, "# Team app", "# Mine")); out == "" {
+		t.Error("a rewrite of the link's target passed")
+	}
+	row := "| `work/<work>.md` | Handoff and next steps for one piece of work |\n"
+	if out, _ := runGuard(t, fxHigh5, editPayload(cwd, target, "|---|---|\n", "|---|---|\n"+row)); out != "" {
+		t.Fatalf("a row added to the link's target was denied: %s", out)
+	}
+	writeFile(t, target, teamRouter+row)
+	if out, _ := runGuard(t, fxHigh5, writePayload(cwd, filepath.Join(claude, "work", "fix.md"), "# fix\n")); out != "" {
+		t.Errorf("the tracker beside the link was denied: %s", out)
+	}
+	if out, _ := runGuard(t, fxHigh5, writePayload(cwd, filepath.Join(dir, "dots", "work", "fix.md"), "# fix\n")); out == "" {
+		t.Error("a tracker beside the link's target passed")
+	}
+}
+
 // editPayload is an Edit of file from a session in cwd.
 func editPayload(cwd, file, old, updated string) string {
 	enc := func(v string) string { return strings.TrimSpace(encodeJSON(v)) }
