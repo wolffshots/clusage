@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -122,8 +123,19 @@ func usage(args []string) error {
 	threshold := fs.Int("threshold", cfg.ThresholdMinutes, "minutes before a new call is made")
 	force := fs.Bool("force", false, "ignore the cache and call the API")
 	verbose := fs.Bool("verbose", false, "print every rate limit header")
+	fieldList := fs.String("fields", "", "print only these values, such as 5h.used,5h.rate")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	// Checked before the read, so a typing error costs no API call.
+	var fields [][2]string
+	if *fieldList != "" {
+		if *verbose {
+			return fmt.Errorf("-fields prints bare values, so it does not combine with -verbose")
+		}
+		if fields, err = parseFields(*fieldList); err != nil {
+			return err
+		}
 	}
 	cfg.Source = *source
 	cfg.ThresholdMinutes = *threshold
@@ -140,7 +152,13 @@ func usage(args []string) error {
 	}
 	// The report goes out before the writes. The API call is already paid for,
 	// so a failed write must not swallow the numbers.
-	report(u.r, u.hist, u.now, u.cached, *verbose)
+	if fields != nil {
+		for _, f := range fields {
+			fmt.Println(fieldValue(u, f[0], f[1]))
+		}
+	} else {
+		report(u.r, u.hist, u.now, u.cached, *verbose)
+	}
 	if u.cached {
 		return nil
 	}
@@ -230,6 +248,52 @@ func loadHistory(db *sql.DB, since time.Time) []Reading {
 		return nil
 	}
 	return hist
+}
+
+// usageValues are the values -fields can name for a window.
+var usageValues = []string{"used", "rate", "reset", "status"}
+
+// parseFields splits a -fields list into window and value pairs. The window
+// name is not checked, because the windows differ by source and by plan.
+func parseFields(list string) ([][2]string, error) {
+	var out [][2]string
+	for _, f := range strings.Split(list, ",") {
+		f = strings.TrimSpace(f)
+		i := strings.LastIndex(f, ".")
+		if i < 1 || !slices.Contains(usageValues, f[i+1:]) {
+			return nil, fmt.Errorf("bad field %q: want window.value, such as 5h.used, with a value from: %s",
+				f, strings.Join(usageValues, ", "))
+		}
+		out = append(out, [2]string{f[:i], f[i+1:]})
+	}
+	return out, nil
+}
+
+// fieldValue renders one -fields value with no unit, for a caller to parse:
+// used is whole percents, rate is percent per hour, and reset is unix seconds.
+// An unknown value or window renders empty, so every field keeps its line.
+func fieldValue(u usageRead, win, val string) string {
+	for _, w := range parseWindows(u.r.Headers) {
+		if w.Name != win {
+			continue
+		}
+		switch val {
+		case "used":
+			if f, ok := w.utilFrac(); ok {
+				return strconv.FormatFloat(f*100, 'f', 0, 64)
+			}
+		case "rate":
+			rate, ok := burnRate(u.hist, w.Name, u.now)
+			return strings.TrimSuffix(rateLabel(rate, ok), "%/h")
+		case "reset":
+			if t, ok := w.resetTime(); ok {
+				return strconv.FormatInt(t.Unix(), 10)
+			}
+		case "status":
+			return w.Status
+		}
+	}
+	return ""
 }
 
 func report(r Reading, hist []Reading, now time.Time, cached bool, verbose bool) {

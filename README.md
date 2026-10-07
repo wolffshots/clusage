@@ -424,6 +424,26 @@ The column is blank when the history cannot support an estimate. That covers a
 fresh database, the minutes right after a window resets, and a history whose
 newest reading is too old to speak for now.
 
+`-fields` prints only the values a caller names, for a script or a status bar.
+The list holds `window.value` names with commas between them. Each value prints
+on its own line, in the order given, with no unit.
+
+```sh
+clusage usage -fields 5h.used,5h.rate    # 61 and 14.2
+clusage usage -fields 5h.used,5h.reset   # 61 and 1791394200
+```
+
+| Value | Prints |
+|---|---|
+| `used` | Whole percents, rounded as the table rounds them. |
+| `rate` | The burn rate in percent per hour. |
+| `reset` | The reset time in unix seconds. |
+| `status` | The status, such as `allowed`. |
+
+An unknown value prints an empty line, so every field keeps its line. A window
+the reading does not have prints an empty line too. A value name that does not
+exist is an error, and `-fields` does not combine with `-verbose`.
+
 Flag defaults come from `config.json`, so a flag is only needed to override the
 configured value for one run.
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -163,6 +164,44 @@ func TestReportLeavesTheColumnBlankWithoutHistory(t *testing.T) {
 	out := captureStdout(t, func() { report(r, []Reading{r}, now, false, false) })
 	if strings.Contains(out, "%/h") {
 		t.Fatalf("one reading supports no rate, so the column must be blank: %q", out)
+	}
+}
+
+func TestFieldsPrintBareValuesInTheOrderAsked(t *testing.T) {
+	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	hist := readingsFrom("5h", []ratePoint{
+		{at: now.Add(-20 * time.Minute), frac: 0.30},
+		{at: now.Add(-10 * time.Minute), frac: 0.32},
+		{at: now.Add(-1 * time.Minute), frac: 0.33},
+	})
+	latest := hist[len(hist)-1]
+	reset := now.Add(2 * time.Hour).Unix()
+	latest.Headers["anthropic-ratelimit-unified-5h-reset"] = strconv.FormatInt(reset, 10)
+	u := usageRead{r: latest, hist: hist, now: now}
+
+	fields, err := parseFields("5h.reset, 5h.used,5h.status,7d-opus.used")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, f := range fields {
+		got = append(got, fieldValue(u, f[0], f[1]))
+	}
+	// A window the reading lacks keeps its place as an empty value.
+	want := []string{strconv.FormatInt(reset, 10), "33", "allowed", ""}
+	if !slices.Equal(got, want) {
+		t.Fatalf("fields = %q, want %q", got, want)
+	}
+	if rate := fieldValue(u, "5h", "rate"); rate == "" || strings.HasSuffix(rate, "%/h") {
+		t.Fatalf("the rate must be a bare number: %q", rate)
+	}
+	if rate := fieldValue(usageRead{r: latest, now: now}, "5h", "rate"); rate != "" {
+		t.Fatalf("no history supports no rate: %q", rate)
+	}
+	for _, bad := range []string{"5h", "5h.usage", ".used", "5h.used,"} {
+		if _, err := parseFields(bad); err == nil {
+			t.Fatalf("parseFields(%q) must fail", bad)
+		}
 	}
 }
 

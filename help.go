@@ -75,7 +75,7 @@ clusage run. The config tab breaks the count down by source and status.
 `,
 
 	"usage": `Usage:
-  clusage usage [-force] [-verbose] [-source name] [-threshold minutes] [-model name]
+  clusage usage [-force] [-verbose] [-fields list] [-source name] [-threshold minutes] [-model name]
 
 Prints one line per limit window: the name, the percent used, the status, the
 burn rate and when the window resets. The last line says whether the reading
@@ -88,7 +88,16 @@ Flags:
   -force              Ignore the cached reading and read the source now.
   -verbose            Also print every stored header, and the token cost of a
                       probe call.
-  -source name        The source to read. Default: "source" in config.json.
+  -fields list        Print only these values, one per line, in the order
+                      given. The list holds window.value names with commas
+                      between them, such as 5h.used,5h.rate. The values:
+                        used    whole percents, such as 61
+                        rate    percent per hour, such as 14.2
+                        reset   the reset time in unix seconds
+                        status  the status, such as allowed
+                      An unknown value prints an empty line. So does a window
+                      the reading does not have.
+  -source name       The source to read. Default: "source" in config.json.
                       "fallback" still applies.
   -threshold minutes  How old a cached reading may be. Default:
                       threshold_minutes in config.json, 5 if unset.
@@ -99,6 +108,7 @@ Examples:
   clusage usage
   clusage usage -force
   clusage usage -threshold 15
+  clusage usage -fields 5h.used,5h.reset   # for a script or a status bar
   clusage usage -source probe -force   # from cron, to start a 5h window
 
 If it fails:
