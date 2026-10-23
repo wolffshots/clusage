@@ -137,7 +137,7 @@ run `sha256sum -c checksums.txt` (Linux) or `shasum -a 256 -c checksums.txt`
 
 ### From source
 
-Go 1.25 or later is required.
+Go 1.26.10 or later is required.
 
 ```sh
 go install github.com/wolffshots/clusage@latest

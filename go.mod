@@ -1,6 +1,6 @@
 module github.com/wolffshots/clusage
 
-go 1.25.5
+go 1.26.10
 
 require (
 	github.com/NimbleMarkets/ntcharts v0.5.1
