@@ -309,6 +309,10 @@ func samePath(a, b string) bool {
 	return eq(a, b) || eq(realPath(a), realPath(b))
 }
 
+// handoffSections says what a handoff holds. The deny and the checkpoint both
+// ask for one, so they share the list.
+const handoffSections = "Write it as markdown for an agent that starts with no context, with these sections: the goal, in the user's own words; what is done, naming the files changed and whether the changes are committed and pushed, and on which branch; the work in progress and exactly where it stopped; the next steps, as an ordered checklist; decisions made and why, and dead ends not to retry; open questions for the user; the commands that build and test the work. Keep it short, well under 200 lines. "
+
 // steps says how to write the handoff. Every other tool stays denied, so the
 // agent writes from what the session already knows.
 func (p *handoffPlan) steps() string {
@@ -326,7 +330,7 @@ func (p *handoffPlan) steps() string {
 	} else {
 		b.WriteString(p.askWhere())
 	}
-	b.WriteString("Call no other tool, and do not run git, a build or a test to gather facts, because those calls are denied. Write from what this session already knows. If the file exists, Read it first, then replace it with Write. Write it as markdown for an agent that starts with no context, with these sections: the goal, in the user's own words; what is done, naming the files changed and whether the changes are committed and pushed, and on which branch; the work in progress and exactly where it stopped; the next steps, as an ordered checklist; decisions made and why, and dead ends not to retry; open questions for the user; the commands that build and test the work. Keep it short, well under 200 lines. ")
+	b.WriteString("Call no other tool, and do not run git, a build or a test to gather facts, because those calls are denied. Write from what this session already knows. If the file exists, Read it first, then replace it with Write. " + handoffSections)
 	b.WriteString("Do not commit or stage the handoff. It is local state for the next session. Inside a repository the guard adds it to .git/info/exclude, so git does not offer it. ")
 	b.WriteString("Then tell the user the path, and that a fresh session resumes with: read <that path> and continue from its next steps. Then end the turn.")
 	path := p.file
@@ -334,6 +338,18 @@ func (p *handoffPlan) steps() string {
 		path = "the file you wrote"
 	}
 	return strings.ReplaceAll(b.String(), "<that path>", path)
+}
+
+// tracker says which file a checkpoint updates. path is that file, or ""
+// when a router names a tracker tree and the agent picks the file.
+func (p *handoffPlan) tracker() (update, path string) {
+	switch {
+	case p.tree != "":
+		return "This project keeps its trackers where its router doc " + p.router + " says: \"" + p.rule + "\". Update the file for this piece of work at " + p.target + ", named for this piece of work. Reuse its file if one exists. Then add or update its row in the index the router names. Do not change the router. ", ""
+	case p.router != "":
+		return "This project keeps its handoff in " + p.file + ", as its router doc " + p.router + " says. Update that file. ", p.file
+	}
+	return "No router doc names a tracker, so update " + p.file + ". It is local state for the next session, kept out of git, so do not stage or commit it. ", p.file
 }
 
 // askWhere is the deny text when no router names a handoff. The agent must

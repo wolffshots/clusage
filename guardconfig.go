@@ -15,6 +15,8 @@ import (
 const (
 	envSoft5h       = "CLUSAGE_GUARD_5H"
 	envHard7d       = "CLUSAGE_GUARD_7D"
+	envCheckpoint5h = "CLUSAGE_GUARD_CHECKPOINT_5H"
+	envCheckpoint7d = "CLUSAGE_GUARD_CHECKPOINT_7D"
 	envInterval     = "CLUSAGE_GUARD_INTERVAL"
 	envIntervalMin  = "CLUSAGE_GUARD_INTERVAL_MIN"
 	envPoll         = "CLUSAGE_GUARD_POLL"
@@ -44,6 +46,8 @@ func writeGuardConfig(w io.Writer, g Guard) error {
 	for _, kv := range [][2]string{
 		{"soft_5h", strconv.Itoa(g.Soft5h)},
 		{"hard_7d", strconv.Itoa(g.Hard7d)},
+		{"checkpoint_5h", strconv.Itoa(g.Checkpoint5h)},
+		{"checkpoint_7d", strconv.Itoa(g.Checkpoint7d)},
 		{"interval", strconv.Itoa(g.Interval)},
 		{"interval_min", strconv.Itoa(g.IntervalMin)},
 		{"poll", strconv.Itoa(g.Poll)},
@@ -106,6 +110,10 @@ func effectiveGuard(g Guard) (Guard, []string) {
 	g.Soft5h, name = guardNumber(envSoft5h, g.Soft5h)
 	note(name)
 	g.Hard7d, name = guardNumber(envHard7d, g.Hard7d)
+	note(name)
+	g.Checkpoint5h, name = guardNumber(envCheckpoint5h, g.Checkpoint5h)
+	note(name)
+	g.Checkpoint7d, name = guardNumber(envCheckpoint7d, g.Checkpoint7d)
 	note(name)
 	g.Interval, name = guardNumber(envInterval, g.Interval)
 	note(name)

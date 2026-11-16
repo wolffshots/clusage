@@ -267,3 +267,36 @@ func TestStoreEntryNamesAgree(t *testing.T) {
 		t.Errorf("token source %q does not name the %s", src.where, storeKind)
 	}
 }
+
+// A checkpoint at or past its cut never fires, and doctor says so once the
+// hook is registered.
+func TestDiagnoseDeadCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	t.Setenv("CLUSAGE_GUARD_STATE", filepath.Join(t.TempDir(), "stamp"))
+	t.Setenv("CLUSAGE_GUARD_CHECKPOINT_5H", "")
+	os.Unsetenv("CLUSAGE_GUARD_CHECKPOINT_5H")
+	body := `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"clusage hook run"}]}]}}`
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeTokens(t)
+	fakeLocations(t)
+	cfg := defaultConfig
+	cfg.Source = "statusline"
+	dead := func(cfg Config) bool {
+		for _, s := range diagnose(memDB(t), cfg, filepath.Join(dir, "config.json"), time.Now()).Suggestions {
+			if strings.Contains(s.Text, "checkpoint_5h_percent is 95") {
+				return true
+			}
+		}
+		return false
+	}
+	if dead(cfg) {
+		t.Fatal("the default levels were reported as dead")
+	}
+	cfg.Guard.Checkpoint5h = 95
+	if !dead(cfg) {
+		t.Fatal("a checkpoint at the 5h cut was not reported")
+	}
+}

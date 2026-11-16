@@ -59,6 +59,10 @@ type Guard struct {
 	Soft5h int `json:"soft_5h_percent"`
 	// Hard7d denies without polling once the 7d window passes this percent.
 	Hard7d int `json:"hard_7d_percent"`
+	// Checkpoint5h and Checkpoint7d ask the main agent to update its tracker
+	// once a window reaches this percent. They deny nothing. 0 turns one off.
+	Checkpoint5h int `json:"checkpoint_5h_percent"`
+	Checkpoint7d int `json:"checkpoint_7d_percent"`
 	// Interval is the seconds between checks at low usage, IntervalMin the
 	// seconds between checks at a threshold.
 	Interval    int `json:"interval_seconds"`
@@ -87,6 +91,8 @@ var defaultConfig = Config{
 	Guard: Guard{
 		Soft5h:       90,
 		Hard7d:       95,
+		Checkpoint5h: 75,
+		Checkpoint7d: 90,
 		Interval:     300,
 		IntervalMin:  30,
 		Poll:         15,
@@ -181,6 +187,12 @@ func (g *Guard) normalize() {
 	}
 	if g.Hard7d < 0 || g.Hard7d > 100 {
 		g.Hard7d = d.Hard7d
+	}
+	if g.Checkpoint5h < 0 || g.Checkpoint5h > 100 {
+		g.Checkpoint5h = d.Checkpoint5h
+	}
+	if g.Checkpoint7d < 0 || g.Checkpoint7d > 100 {
+		g.Checkpoint7d = d.Checkpoint7d
 	}
 	if g.Interval < 0 {
 		g.Interval = d.Interval
