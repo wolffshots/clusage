@@ -597,7 +597,7 @@ func (m model) configView() string {
 		guardTitle += dimStyle.Render("   env: " + strings.Join(over, ", "))
 	}
 	b.WriteString(frame(guardTitle, rows(
-		[2]string{"cuts", val("5h " + itoa(g.Soft5h) + "%   7d " + itoa(g.Hard7d) + "%")},
+		[2]string{"cuts", cutLabel("5h", g.Soft5h, g.Checkpoint5h) + "   " + cutLabel("7d", g.Hard7d, g.Checkpoint7d)},
 		[2]string{"check every", val(itoa(g.Interval) + "s idle, " + itoa(g.IntervalMin) +
 			"s near a cut, " + itoa(g.Poll) + "s while paused")},
 		[2]string{"max wait", val(itoa(g.MaxWait)+"s, then deny") +
@@ -616,6 +616,20 @@ func (m model) configView() string {
 
 	b.WriteString(dimStyle.Render("  Edit the file and restart to apply. Cron: minute hour day-of-month month day-of-week."))
 	return b.String()
+}
+
+// cutLabel names a window's cut and its checkpoint. A checkpoint at or past
+// the cut never fires, because the cut denies the call first, so it is
+// flagged.
+func cutLabel(name string, cut, checkpoint int) string {
+	s := valueStyle.Render(name + " " + itoa(cut) + "%")
+	switch {
+	case checkpoint == 0:
+		return s + dimStyle.Render(", checkpoint off")
+	case checkpoint >= cut:
+		return s + warnStyle.Render(", checkpoint "+itoa(checkpoint)+"% never fires")
+	}
+	return s + valueStyle.Render(", checkpoint "+itoa(checkpoint)+"%")
 }
 
 // overageLabel says whether the guard keeps working once a window is spent.

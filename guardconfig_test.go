@@ -27,11 +27,14 @@ func TestGuardNormalize(t *testing.T) {
 	if g.Soft5h != 0 || g.Hard7d != 0 {
 		t.Errorf("a zero cut was replaced: %+v", g)
 	}
+	if g.Checkpoint5h != 0 || g.Checkpoint7d != 0 {
+		t.Errorf("a checkpoint turned off with zero was replaced: %+v", g)
+	}
 
 	// Everything out of range falls back, and an empty allow list reads as
 	// unset because the hook script cannot express one either.
-	g = Guard{Soft5h: 101, Hard7d: -1, Interval: -1, IntervalMin: -5,
-		Poll: 0, MaxWait: -2, AllowTools: []string{}}
+	g = Guard{Soft5h: 101, Hard7d: -1, Checkpoint5h: 101, Checkpoint7d: -1,
+		Interval: -1, IntervalMin: -5, Poll: 0, MaxWait: -2, AllowTools: []string{}}
 	g.normalize()
 	if !reflect.DeepEqual(g, d) {
 		t.Errorf("bad values did not fall back to the defaults:\ngot  %+v\nwant %+v", g, d)
@@ -72,12 +75,12 @@ func TestEffectiveGuardEnv(t *testing.T) {
 // of key name here silently disables that setting.
 func TestWriteGuardConfig(t *testing.T) {
 	var b strings.Builder
-	if err := writeGuardConfig(&b, Guard{Soft5h: 95, Hard7d: 97, Interval: 300,
-		IntervalMin: 30, Poll: 15, MaxWait: 45, AllowOverage: true,
-		AllowTools: []string{"One", "Two"}, Handoff: "HANDOFF.md"}); err != nil {
+	if err := writeGuardConfig(&b, Guard{Soft5h: 95, Hard7d: 97, Checkpoint5h: 70,
+		Checkpoint7d: 92, Interval: 300, IntervalMin: 30, Poll: 15, MaxWait: 45,
+		AllowOverage: true, AllowTools: []string{"One", "Two"}, Handoff: "HANDOFF.md"}); err != nil {
 		t.Fatal(err)
 	}
-	want := "soft_5h=95\nhard_7d=97\ninterval=300\ninterval_min=30\n" +
+	want := "soft_5h=95\nhard_7d=97\ncheckpoint_5h=70\ncheckpoint_7d=92\ninterval=300\ninterval_min=30\n" +
 		"poll=15\nmaxwait=45\nallow_overage=1\nallow_tools=One Two\nhandoff_file=HANDOFF.md\n"
 	if b.String() != want {
 		t.Errorf("got:\n%s\nwant:\n%s", b.String(), want)
@@ -109,7 +112,7 @@ func TestDefaultConfigFileIsComplete(t *testing.T) {
 	}
 	guard, _ := got["guard"].(map[string]any)
 	for _, key := range []string{"soft_5h_percent", "hard_7d_percent",
-		"interval_seconds", "interval_min_seconds", "poll_seconds",
+		"checkpoint_5h_percent", "checkpoint_7d_percent", "interval_seconds", "interval_min_seconds", "poll_seconds",
 		"max_wait_seconds", "allow_overage", "allow_tools", "handoff_file"} {
 		if _, ok := guard[key]; !ok {
 			t.Errorf("the default guard section has no %q", key)

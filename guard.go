@@ -8,6 +8,10 @@ package main
 // threshold. A read that yields no usable window denies too, because an
 // unknown budget is not the same as a free one.
 //
+// Below those thresholds a checkpoint asks the main agent, once per session, to
+// update its tracker and ask the user how to go on. The checkpoint denies
+// nothing.
+//
 // On SessionStart it reports what a resumed session costs to re-send, but only
 // once the prompt cache behind it has expired. Claude Code measures that and
 // passes it in, so this path reads nothing and adds no probe.
@@ -522,8 +526,8 @@ func hookRun(stdin io.Reader, stdout, stderr io.Writer) {
 	fmt.Fprint(stdout, gr.check(payload))
 }
 
-// check runs the guard rail on a PreToolUse payload, and returns the deny, or
-// "" to let the call through.
+// check runs the guard rail on a PreToolUse payload. It returns the deny, a
+// checkpoint that lets the call through, or "" to let the call through.
 func (gr guardRail) check(payload []byte) string {
 	if os.Getenv("CLUSAGE_GUARD_DISABLE") == "1" {
 		return ""
@@ -536,6 +540,8 @@ func (gr guardRail) check(payload []byte) string {
 			return ""
 		}
 	}
+	var p toolEvent
+	_ = json.Unmarshal(payload, &p)
 	g := gr.g
 	state := stampPath()
 	st := readStamp(state)
@@ -552,15 +558,9 @@ func (gr guardRail) check(payload []byte) string {
 		}
 	}
 	if time.Now().Unix()-st.at < int64(interval) {
-		return ""
+		return gr.checkpoint(p, st)
 	}
 
-	var p struct {
-		ToolName  string    `json:"tool_name"`
-		Cwd       string    `json:"cwd"`
-		ToolInput toolInput `json:"tool_input"`
-	}
-	_ = json.Unmarshal(payload, &p)
 	if p.ToolName != "" && slices.Contains(g.AllowTools, p.ToolName) {
 		return ""
 	}
@@ -615,7 +615,7 @@ func (gr guardRail) check(payload []byte) string {
 				fmt.Fprintf(gr.stderr, "clusage guard rail: 5h usage back down to %s%%, work resumed after %ds.\n", fmtNum(d.w.pct), waited)
 			}
 			mark(state, d)
-			return ""
+			return gr.checkpoint(p, readStamp(state))
 		}
 		// SOFT: a hook that blocks for minutes makes the session look dead, and
 		// the app kills it. Wait only for a short spike, then deny.
@@ -626,6 +626,132 @@ func (gr guardRail) check(payload []byte) string {
 		waited += g.Poll
 		d = judge(0)
 	}
+}
+
+// ---- the checkpoint --------------------------------------------------------------
+
+// toolEvent is the part of a PreToolUse payload the guard reads. AgentID is
+// set when a subagent makes the call.
+type toolEvent struct {
+	ToolName  string    `json:"tool_name"`
+	Cwd       string    `json:"cwd"`
+	SessionID string    `json:"session_id"`
+	AgentID   string    `json:"agent_id"`
+	ToolInput toolInput `json:"tool_input"`
+}
+
+// sessionID matches a session id that is safe in a file name. The payload
+// comes from outside, so an id with a path in it gets no checkpoint.
+var sessionID = regexp.MustCompile(`^[A-Za-z0-9-]{1,128}$`)
+
+// checkpointDir holds a marker per session and window that had its
+// checkpoint. It sits beside the stamp, so a test that moves the stamp moves
+// the markers too.
+func checkpointDir() string {
+	return strings.TrimSuffix(stampPath(), ".stamp") + "-checkpoint"
+}
+
+// claimMarker creates a marker and reports whether this call made it. With
+// O_EXCL only one of two parallel tool calls wins. A marker that cannot be
+// written never fires, because a checkpoint on every call is worse than none.
+// Each new marker clears the markers older than 8 days.
+func claimMarker(dir, name string) bool {
+	if os.MkdirAll(dir, 0o700) != nil {
+		return false
+	}
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	old := time.Now().Add(-8 * 24 * time.Hour)
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if fi, err := e.Info(); err == nil && fi.ModTime().Before(old) {
+			os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
+	return true
+}
+
+// checkpoint asks the main agent to update its tracker once a window reaches
+// its checkpoint level, then to ask the user how to go on. It denies nothing,
+// so it carries no permission decision, which would skip the permission
+// prompt. The numbers come from the stamp, so it reads no usage. It fires once
+// per session and window. A window that falls below its level again arms it
+// again. A subagent and a tool on the allow list never get one.
+func (gr guardRail) checkpoint(p toolEvent, st stamp) string {
+	g := gr.g
+	if p.AgentID != "" || !sessionID.MatchString(p.SessionID) || slices.Contains(g.AllowTools, p.ToolName) {
+		return ""
+	}
+	dir := checkpointDir()
+	var head, short []string
+	for _, w := range []struct {
+		name, cut    string
+		pct, rate    float64
+		level, limit int
+	}{
+		{"5h", "soft limit", st.p5, st.r5, g.Checkpoint5h, g.Soft5h},
+		{"7d", "hard cut", st.p7, st.r7, g.Checkpoint7d, g.Hard7d},
+	} {
+		if w.level <= 0 || w.pct < 0 {
+			continue
+		}
+		marker := p.SessionID + "-" + w.name
+		if w.pct < float64(w.level) {
+			os.Remove(filepath.Join(dir, marker))
+			continue
+		}
+		if !claimMarker(dir, marker) {
+			continue
+		}
+		head = append(head, fmt.Sprintf("%s limit is at %s%% (checkpoint %d%%, %s %d%%).%s",
+			w.name, fmtNum(w.pct), w.level, w.cut, w.limit, trend(w.pct, fmtNum(w.rate))))
+		short = append(short, w.name+" at "+fmtNum(w.pct)+"%")
+	}
+	if len(head) == 0 {
+		return ""
+	}
+
+	options := "keep working, compact and then keep working, or stop here"
+	compact := "/compact Keep the goal and the open next steps."
+	var steps []string
+	handoff := ""
+	if plan := planHandoff(g.Handoff, p.Cwd); plan != nil {
+		update, path := plan.tracker()
+		fill := ""
+		if path == "" {
+			path, fill = "<path>", " Put the path of the file you updated in place of <path>."
+		} else if plan.excludes(path) {
+			excludeHandoff(path)
+		}
+		steps = append(steps, "Update the docs that hold the state of this work. "+update+"Write from what this session already knows. Do not run git, a build or a test to gather facts.")
+		options = "keep working, compact and then keep working, write a full handoff and stop, or stop here"
+		compact = "/compact Keep the goal, the open next steps, and the path " + path + ". That file holds the rest." + fill
+		handoff = "If the user picks the handoff, rewrite that file as a full handoff. " + handoffSections + "Then tell the user the path, and that a fresh session resumes with: read " + path + " and continue from its next steps. Then end the turn."
+	}
+	steps = append(steps,
+		"Tell the user about the checkpoint in one sentence.",
+		"Ask one short multiple choice question, and wait for the answer. The options: "+options+".",
+		"If the user picks compact, you cannot run /compact yourself. Give the user this line to run: "+compact)
+	if handoff != "" {
+		steps = append(steps, handoff)
+	}
+	var b strings.Builder
+	b.WriteString("clusage checkpoint: the " + strings.Join(head, " The ") + " This is a checkpoint, not a limit, and no call is denied. Finish the step in progress first, and do not stop in the middle of an edit. Then:")
+	for i, s := range steps {
+		fmt.Fprintf(&b, " %d. %s", i+1, s)
+	}
+
+	type specific struct {
+		HookEventName     string `json:"hookEventName"`
+		AdditionalContext string `json:"additionalContext"`
+	}
+	return encodeJSON(struct {
+		SystemMessage      string   `json:"systemMessage"`
+		HookSpecificOutput specific `json:"hookSpecificOutput"`
+	}{"clusage checkpoint: " + strings.Join(short, ", ") + ".", specific{"PreToolUse", b.String()}})
 }
 
 // ---- the resume report -----------------------------------------------------------

@@ -44,7 +44,8 @@ func guardEnv(t *testing.T) (dir string) {
 	t.Setenv("CLUSAGE_GUARD_MAXWAIT", "2")
 	for _, k := range []string{"CLUSAGE_GUARD_DISABLE", "CLUSAGE_RESUME_DISABLE", "CLUSAGE_GUARD_5H",
 		"CLUSAGE_GUARD_7D", "CLUSAGE_GUARD_INTERVAL", "CLUSAGE_GUARD_INTERVAL_MIN",
-		"CLUSAGE_GUARD_ALLOW_OVERAGE", "CLUSAGE_GUARD_ALLOW_TOOLS", "CLUSAGE_GUARD_HANDOFF"} {
+		"CLUSAGE_GUARD_ALLOW_OVERAGE", "CLUSAGE_GUARD_ALLOW_TOOLS", "CLUSAGE_GUARD_HANDOFF",
+		"CLUSAGE_GUARD_CHECKPOINT_5H", "CLUSAGE_GUARD_CHECKPOINT_7D"} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
@@ -542,4 +543,176 @@ func TestRowsFromReading(t *testing.T) {
 	if seven.name != "7d" || seven.pct != 20 || seven.reset != "" {
 		t.Errorf("7d row = %+v", seven)
 	}
+}
+
+// ---- the checkpoint ------------------------------------------------------------
+
+const fxCheckpoint = `5h  76% used  allowed  12.0%/h  resets Wed 19:30 (in 4h36m)
+7d  20% used  allowed  0.5%/h`
+
+// toolCall is a PreToolUse payload from one session. extra adds fields.
+func toolCall(session, extra string) string {
+	return `{"hook_event_name":"PreToolUse","tool_name":"Bash","session_id":"` + session + `"` + extra + `}`
+}
+
+// setStamp records a check that ran just now, so the next call takes the
+// cached path and judges these numbers.
+func setStamp(t *testing.T, p5, p7 float64) {
+	t.Helper()
+	line := fmt.Sprintf("%d %s %s -1 -1\n", time.Now().Unix(), fmtNum(p5), fmtNum(p7))
+	if err := os.WriteFile(os.Getenv("CLUSAGE_GUARD_STATE"), []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The checkpoint carries context and a notice, never a permission decision,
+// and fires once per session.
+func TestCheckpointFiresOncePerSession(t *testing.T) {
+	guardEnv(t)
+	out, _ := runGuard(t, fxCheckpoint, toolCall("s1", ""))
+	for _, want := range []string{
+		`"systemMessage":"clusage checkpoint: 5h at 76%."`,
+		`"hookEventName":"PreToolUse","additionalContext":"clusage checkpoint: the 5h limit is at 76% (checkpoint 75%, soft limit 90%). It is rising at 12.0%/h, so it fills in about 120m. This is a checkpoint, not a limit`,
+		"The options: keep working, compact and then keep working, write a full handoff and stop, or stop here.",
+		"you cannot run /compact yourself",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("want %q, got %s", want, out)
+		}
+	}
+	if strings.Contains(out, "permissionDecision") {
+		t.Fatalf("a checkpoint must not decide the permission: %s", out)
+	}
+	if out, _ := hookOnce(toolCall("s1", "")); out != "" {
+		t.Fatalf("the same session fired twice: %s", out)
+	}
+	if out, _ := hookOnce(toolCall("s2", "")); !strings.Contains(out, "additionalContext") {
+		t.Fatalf("another session got no checkpoint: %s", out)
+	}
+}
+
+func TestCheckpointSkips(t *testing.T) {
+	cases := []struct {
+		name, fixture, payload, env string
+	}{
+		{"below the level", fxLow, toolCall("s1", ""), ""},
+		{"subagent", fxCheckpoint, toolCall("s1", `,"agent_id":"a1"`), ""},
+		{"no session", fxCheckpoint, `{"tool_name":"Bash"}`, ""},
+		{"path in the session", fxCheckpoint, toolCall("../evil", ""), ""},
+		{"allow list", fxCheckpoint, `{"tool_name":"AskUserQuestion","session_id":"s1"}`, ""},
+		{"level 0", fxCheckpoint, toolCall("s1", ""), "0"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := guardEnv(t)
+			if c.env != "" {
+				t.Setenv("CLUSAGE_GUARD_CHECKPOINT_5H", c.env)
+			}
+			if out, _ := runGuard(t, c.fixture, c.payload); out != "" {
+				t.Fatalf("want nothing, got %s", out)
+			}
+			if fileExists(filepath.Join(dir, "evil-5h")) {
+				t.Fatal("a session id wrote a marker outside the marker directory")
+			}
+			if entries, _ := os.ReadDir(checkpointDir()); len(entries) > 0 {
+				t.Fatalf("a skipped checkpoint left a marker: %v", entries)
+			}
+		})
+	}
+}
+
+// A deny wins. The soft cut denies, and no checkpoint rides along.
+func TestCheckpointNeverJoinsADeny(t *testing.T) {
+	guardEnv(t)
+	out, _ := runGuard(t, fxHigh5, toolCall("s1", ""))
+	if !strings.Contains(out, `"permissionDecision":"deny"`) || strings.Contains(out, "checkpoint") {
+		t.Fatalf("got %s", out)
+	}
+}
+
+func TestCheckpointOffSwitch(t *testing.T) {
+	dir := guardEnv(t)
+	os.MkdirAll(filepath.Join(dir, "claude"), 0o700)
+	if err := setGuardOff(offPath(), true); err != nil {
+		t.Fatal(err)
+	}
+	if out, _ := runGuard(t, fxCheckpoint, toolCall("s1", "")); out != "" {
+		t.Fatalf("off switch, got %s", out)
+	}
+}
+
+// A window that drops below its level, as after a reset, arms the checkpoint
+// again.
+func TestCheckpointRearms(t *testing.T) {
+	guardEnv(t)
+	if out, _ := runGuard(t, fxCheckpoint, toolCall("s1", "")); out == "" {
+		t.Fatal("no first checkpoint")
+	}
+	setStamp(t, 50, 20)
+	if out, _ := hookOnce(toolCall("s1", "")); out != "" {
+		t.Fatalf("fired below the level: %s", out)
+	}
+	setStamp(t, 76, 20)
+	if out, _ := hookOnce(toolCall("s1", "")); !strings.Contains(out, "5h limit is at 76%") {
+		t.Fatalf("did not fire again after the window dropped: %s", out)
+	}
+}
+
+func TestCheckpointBothWindows(t *testing.T) {
+	guardEnv(t)
+	out, _ := runGuard(t, "5h  80% used  allowed\n7d  91% used  allowed", toolCall("s1", ""))
+	for _, want := range []string{
+		`"systemMessage":"clusage checkpoint: 5h at 80%, 7d at 91%."`,
+		"the 5h limit is at 80% (checkpoint 75%, soft limit 90%). The 7d limit is at 91% (checkpoint 90%, hard cut 95%).",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("want %q, got %s", want, out)
+		}
+	}
+}
+
+// The checkpoint names the same file the deny would.
+func TestCheckpointTracker(t *testing.T) {
+	t.Run("default file", func(t *testing.T) {
+		cwd := cwdFor(guardEnv(t))
+		out, _ := runGuard(t, fxCheckpoint, cwd(toolCall("s1", `,"cwd":"CWD"`)))
+		for _, want := range []string{
+			cwd("No router doc names a tracker, so update CWD/HANDOFF.md."),
+			cwd("/compact Keep the goal, the open next steps, and the path CWD/HANDOFF.md."),
+			cwd("read CWD/HANDOFF.md and continue from its next steps"),
+			"what is done, naming the files changed",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("want %q, got %s", want, out)
+			}
+		}
+	})
+	t.Run("router tree", func(t *testing.T) {
+		dir := guardEnv(t)
+		cwd := cwdFor(dir)
+		work := filepath.Join(dir, "work")
+		os.MkdirAll(work, 0o700)
+		row := "| `docs/work/<work>.md` | Handoff and next steps for one piece of work. Index: `docs/work/README.md` |\n"
+		if err := os.WriteFile(filepath.Join(work, "CLAUDE.md"), []byte(row), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, _ := runGuard(t, fxCheckpoint, cwd(toolCall("s1", `,"cwd":"CWD"`)))
+		for _, want := range []string{
+			"This project keeps its trackers where its router doc",
+			"and the path <path>. That file holds the rest. Put the path of the file you updated in place of <path>.",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("want %q, got %s", want, out)
+			}
+		}
+	})
+	t.Run("handoff off", func(t *testing.T) {
+		guardEnv(t)
+		t.Setenv("CLUSAGE_GUARD_HANDOFF", "off")
+		out, _ := runGuard(t, fxCheckpoint, toolCall("s1", ""))
+		if !strings.Contains(out, "The options: keep working, compact and then keep working, or stop here.") ||
+			!strings.Contains(out, "/compact Keep the goal and the open next steps.") || strings.Contains(out, "handoff") {
+			t.Fatalf("got %s", out)
+		}
+	})
 }

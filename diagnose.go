@@ -493,6 +493,18 @@ func diagnose(db *sql.DB, cfg Config, cfgPath string, now time.Time) diagnosis {
 		hook += ", CLUSAGE_GUARD_DISABLE=1"
 	}
 	setup = append(setup, [2]string{"guard hook", hook})
+	// A checkpoint at or past its cut never fires, because the cut denies the
+	// call first. Nothing else would show that it is dead.
+	if g, _ := effectiveGuard(cfg.Guard); gs.Registered {
+		for _, c := range []struct {
+			field, cut string
+			level, at  int
+		}{{"checkpoint_5h_percent", "5h soft limit", g.Checkpoint5h, g.Soft5h}, {"checkpoint_7d_percent", "7d hard cut", g.Checkpoint7d, g.Hard7d}} {
+			if c.level > 0 && c.level >= c.at {
+				suggest(sugWarn, "%s is %d, at or past the %s of %d%%, so that checkpoint never fires. Set it below the cut, or to 0 to turn it off.", c.field, c.level, c.cut, c.at)
+			}
+		}
+	}
 
 	for _, s := range []struct{ name, value string }{{"fetch_cron", cfg.FetchCron}, {"probe_cron", cfg.ProbeCron}} {
 		label := "(unset)"
