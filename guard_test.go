@@ -573,12 +573,17 @@ func TestCheckpointFiresOncePerSession(t *testing.T) {
 	for _, want := range []string{
 		`"systemMessage":"clusage checkpoint: 5h at 76%."`,
 		`"hookEventName":"PreToolUse","additionalContext":"clusage checkpoint: the 5h limit is at 76% (checkpoint 75%, soft limit 90%). It is rising at 12.0%/h, so it fills in about 120m. This is a checkpoint, not a limit`,
-		"The options: keep working, compact and then keep working, write a full handoff and stop, or stop here.",
-		"you cannot run /compact yourself",
+		"Do not stop, and do not ask the user a question.",
+		"make sure they are up to date. If it has none, skip this step.",
+		"recommend that they compact. You cannot run /compact yourself",
+		"Keep working on the task.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("want %q, got %s", want, out)
 		}
+	}
+	if strings.Contains(out, "multiple choice") || strings.Contains(out, "stop here") {
+		t.Fatalf("a checkpoint must not ask a question: %s", out)
 	}
 	if strings.Contains(out, "permissionDecision") {
 		t.Fatalf("a checkpoint must not decide the permission: %s", out)
@@ -674,17 +679,30 @@ func TestCheckpointBothWindows(t *testing.T) {
 // The checkpoint names the same file the deny would.
 func TestCheckpointTracker(t *testing.T) {
 	t.Run("default file", func(t *testing.T) {
-		cwd := cwdFor(guardEnv(t))
+		dir := guardEnv(t)
+		cwd := cwdFor(dir)
+		work := filepath.Join(dir, "work")
+		os.MkdirAll(work, 0o700)
+		if err := os.WriteFile(filepath.Join(work, "HANDOFF.md"), []byte("# state\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		out, _ := runGuard(t, fxCheckpoint, cwd(toolCall("s1", `,"cwd":"CWD"`)))
 		for _, want := range []string{
 			cwd("No router doc names a tracker, so update CWD/HANDOFF.md."),
 			cwd("/compact Keep the goal, the open next steps, and the path CWD/HANDOFF.md."),
-			cwd("read CWD/HANDOFF.md and continue from its next steps"),
-			"what is done, naming the files changed",
 		} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("want %q, got %s", want, out)
 			}
+		}
+	})
+	// With no router row and no default file there are no docs to name, so the
+	// checkpoint creates none.
+	t.Run("no default file", func(t *testing.T) {
+		cwd := cwdFor(guardEnv(t))
+		out, _ := runGuard(t, fxCheckpoint, cwd(toolCall("s1", `,"cwd":"CWD"`)))
+		if strings.Contains(out, "HANDOFF.md") || !strings.Contains(out, "/compact Keep the goal and the open next steps.") {
+			t.Fatalf("got %s", out)
 		}
 	})
 	t.Run("router tree", func(t *testing.T) {
@@ -710,8 +728,7 @@ func TestCheckpointTracker(t *testing.T) {
 		guardEnv(t)
 		t.Setenv("CLUSAGE_GUARD_HANDOFF", "off")
 		out, _ := runGuard(t, fxCheckpoint, toolCall("s1", ""))
-		if !strings.Contains(out, "The options: keep working, compact and then keep working, or stop here.") ||
-			!strings.Contains(out, "/compact Keep the goal and the open next steps.") || strings.Contains(out, "handoff") {
+		if !strings.Contains(out, "/compact Keep the goal and the open next steps.") || strings.Contains(out, "handoff") {
 			t.Fatalf("got %s", out)
 		}
 	})

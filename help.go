@@ -240,7 +240,7 @@ the environment. Use it to check what the hook will apply.
 Keys, from "guard" in ~/.config/clusage/config.json:
   soft_5h        pause at this 5h percent (soft_5h_percent, default 90)
   hard_7d        deny past this 7d percent (hard_7d_percent, default 95)
-  checkpoint_5h  ask the agent to update its tracker at this 5h percent
+  checkpoint_5h  ask the agent to update its docs at this 5h percent
                  (checkpoint_5h_percent, default 75, 0 turns it off)
   checkpoint_7d  the same at this 7d percent (checkpoint_7d_percent,
                  default 90, 0 turns it off)

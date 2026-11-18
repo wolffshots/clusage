@@ -309,8 +309,7 @@ func samePath(a, b string) bool {
 	return eq(a, b) || eq(realPath(a), realPath(b))
 }
 
-// handoffSections says what a handoff holds. The deny and the checkpoint both
-// ask for one, so they share the list.
+// handoffSections says what a handoff holds.
 const handoffSections = "Write it as markdown for an agent that starts with no context, with these sections: the goal, in the user's own words; what is done, naming the files changed and whether the changes are committed and pushed, and on which branch; the work in progress and exactly where it stopped; the next steps, as an ordered checklist; decisions made and why, and dead ends not to retry; open questions for the user; the commands that build and test the work. Keep it short, well under 200 lines. "
 
 // steps says how to write the handoff. Every other tool stays denied, so the
@@ -341,13 +340,17 @@ func (p *handoffPlan) steps() string {
 }
 
 // tracker says which file a checkpoint updates. path is that file, or ""
-// when a router names a tracker tree and the agent picks the file.
+// when a router names a tracker tree and the agent picks the file. update is
+// "" when no router names a tracker and the default file does not exist, so
+// the checkpoint creates no file.
 func (p *handoffPlan) tracker() (update, path string) {
 	switch {
 	case p.tree != "":
 		return "This project keeps its trackers where its router doc " + p.router + " says: \"" + p.rule + "\". Update the file for this piece of work at " + p.target + ", named for this piece of work. Reuse its file if one exists. Then add or update its row in the index the router names. Do not change the router. ", ""
 	case p.router != "":
 		return "This project keeps its handoff in " + p.file + ", as its router doc " + p.router + " says. Update that file. ", p.file
+	case !fileExists(p.file):
+		return "", ""
 	}
 	return "No router doc names a tracker, so update " + p.file + ". It is local state for the next session, kept out of git, so do not stage or commit it. ", p.file
 }

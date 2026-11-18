@@ -459,7 +459,7 @@ before each tool call:
 | 5h window at or above 90% | Pause the tool call. Poll every 15s. Release the call once the window drops below 90%. |
 | 5h window still high after 45s | Deny the call, and have the agent ask you how to go on. |
 | Any 7d window at or above 95% | Deny the call at once. No polling. |
-| 5h window at or above 75%, or 7d at or above 90% | Allow the call, and ask the agent once per session to update its tracker. See [The checkpoint](#the-checkpoint). |
+| 5h window at or above 75%, or 7d at or above 90% | Allow the call, and ask the agent once per session to update its docs and recommend a compaction. See [The checkpoint](#the-checkpoint). |
 | The tool is a scheduling tool | Allow the call, so the agent can book its retry. |
 | The tool reads or writes the [handoff file](#the-handoff-file) | Allow the call while no window is exhausted, so the agent can leave its state for a fresh session. |
 | `clusage` reports no usable window | Deny the call at once. No polling. |
@@ -622,29 +622,30 @@ At 75% of the 5h window, or 90% of the 7d window, the hook lets the tool call
 through and gives Claude a note beside the result. The note asks Claude to:
 
 1. Finish the step in progress.
-2. Update the tracker for this piece of work. That is the file a handoff
-   would go to, see [Where it goes](#where-it-goes). With no handoff row in
-   any router, it is `HANDOFF.md`.
-3. Tell you about the checkpoint in one sentence.
-4. Ask you how to go on: keep working, compact and then keep working, write a
-   full handoff and stop, or stop here.
+2. Spend a step on the docs. If the project has docs that the work changes,
+   make sure they are up to date. That includes the tracker for this piece
+   of work, the file a handoff would go to, see [Where it goes](#where-it-goes).
+   With no handoff row in any router, the tracker is `HANDOFF.md`, and only if
+   it exists. With no docs, Claude skips this step.
+3. Tell you about the checkpoint in one sentence, and recommend a compaction.
+4. Keep working.
 
-A checkpoint denies nothing, so no hook error shows. The app and the terminal
-also show a notice, such as `clusage checkpoint: 5h at 76%.`
+A checkpoint does not stop the work and asks you no question. It denies
+nothing, so no hook error shows. The app and the terminal also show a notice,
+such as `clusage checkpoint: 5h at 76%.`
 
-Claude cannot start a compaction itself. Pick compact, and Claude gives you a
-`/compact` line to run. The line names the tracker, so the summary keeps the
-path to the full state.
+Claude cannot start a compaction itself, so it gives you a `/compact` line to
+run when the turn ends. When there is a tracker, the line names it, so the
+summary keeps the path to the full state.
 
 Each session gets one checkpoint per window. A subagent gets none, so only the
-main agent updates the tracker. When a window drops below its level again, as
+main agent updates the docs. When a window drops below its level again, as
 after a reset, the checkpoint arms again. The checkpoint reads the numbers
 that the last guard check stored, so it adds no probe and no usage read.
 
 A checkpoint is advice. Claude can skip it, and the cuts still apply. Set
 `checkpoint_5h_percent` or `checkpoint_7d_percent` to `0` to turn one off. With
-`handoff_file` set to `off`, the checkpoint skips the tracker update and the
-handoff option.
+`handoff_file` set to `off`, the checkpoint names no tracker.
 
 A level at or above its cut never fires, because the cut denies the call
 first. The Config tab and `clusage doctor` flag such a level. If you raise a
@@ -784,7 +785,7 @@ default in the table.
 |---|---|---|---|
 | `soft_5h_percent` | `CLUSAGE_GUARD_5H` | `90` | Soft threshold, percent. Pause and poll. |
 | `hard_7d_percent` | `CLUSAGE_GUARD_7D` | `95` | Hard threshold, percent. Deny without polling. |
-| `checkpoint_5h_percent` | `CLUSAGE_GUARD_CHECKPOINT_5H` | `75` | Checkpoint, percent. Ask the agent to update its tracker. `0` turns it off. See [The checkpoint](#the-checkpoint). |
+| `checkpoint_5h_percent` | `CLUSAGE_GUARD_CHECKPOINT_5H` | `75` | Checkpoint, percent. Ask the agent to update its docs and recommend a compaction. `0` turns it off. See [The checkpoint](#the-checkpoint). |
 | `checkpoint_7d_percent` | `CLUSAGE_GUARD_CHECKPOINT_7D` | `90` | The same checkpoint for the 7d window. |
 | `interval_seconds` | `CLUSAGE_GUARD_INTERVAL` | `300` | Seconds between checks at low usage. |
 | `interval_min_seconds` | `CLUSAGE_GUARD_INTERVAL_MIN` | `30` | Seconds between checks at a threshold. |

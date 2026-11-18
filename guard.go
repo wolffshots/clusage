@@ -9,8 +9,8 @@ package main
 // unknown budget is not the same as a free one.
 //
 // Below those thresholds a checkpoint asks the main agent, once per session, to
-// update its tracker and ask the user how to go on. The checkpoint denies
-// nothing.
+// update its docs and recommend a compaction, then keep working. The
+// checkpoint denies nothing and asks no question.
 //
 // On SessionStart it reports what a resumed session costs to re-send, but only
 // once the prompt cache behind it has expired. Claude Code measures that and
@@ -674,8 +674,9 @@ func claimMarker(dir, name string) bool {
 	return true
 }
 
-// checkpoint asks the main agent to update its tracker once a window reaches
-// its checkpoint level, then to ask the user how to go on. It denies nothing,
+// checkpoint asks the main agent to update its docs once a window reaches its
+// checkpoint level, then to recommend a compaction and keep working. It asks
+// the user no question, so the work does not stop. It denies nothing,
 // so it carries no permission decision, which would skip the permission
 // prompt. The numbers come from the stamp, so it reads no usage. It fires once
 // per session and window. A window that falls below its level again arms it
@@ -714,32 +715,27 @@ func (gr guardRail) checkpoint(p toolEvent, st stamp) string {
 		return ""
 	}
 
-	options := "keep working, compact and then keep working, or stop here"
 	compact := "/compact Keep the goal and the open next steps."
-	var steps []string
-	handoff := ""
+	docs := "Spend this step on the docs. If this project has docs that this session's work changes, such as a tracker, a README or a CLAUDE.md, make sure they are up to date. If it has none, skip this step. "
 	if plan := planHandoff(g.Handoff, p.Cwd); plan != nil {
-		update, path := plan.tracker()
-		fill := ""
-		if path == "" {
-			path, fill = "<path>", " Put the path of the file you updated in place of <path>."
-		} else if plan.excludes(path) {
-			excludeHandoff(path)
+		if update, path := plan.tracker(); update != "" {
+			fill := ""
+			if path == "" {
+				path, fill = "<path>", " Put the path of the file you updated in place of <path>."
+			} else if plan.excludes(path) {
+				excludeHandoff(path)
+			}
+			docs += update
+			compact = "/compact Keep the goal, the open next steps, and the path " + path + ". That file holds the rest." + fill
 		}
-		steps = append(steps, "Update the docs that hold the state of this work. "+update+"Write from what this session already knows. Do not run git, a build or a test to gather facts.")
-		options = "keep working, compact and then keep working, write a full handoff and stop, or stop here"
-		compact = "/compact Keep the goal, the open next steps, and the path " + path + ". That file holds the rest." + fill
-		handoff = "If the user picks the handoff, rewrite that file as a full handoff. " + handoffSections + "Then tell the user the path, and that a fresh session resumes with: read " + path + " and continue from its next steps. Then end the turn."
 	}
-	steps = append(steps,
-		"Tell the user about the checkpoint in one sentence.",
-		"Ask one short multiple choice question, and wait for the answer. The options: "+options+".",
-		"If the user picks compact, you cannot run /compact yourself. Give the user this line to run: "+compact)
-	if handoff != "" {
-		steps = append(steps, handoff)
+	steps := []string{
+		docs + "Write from what this session already knows. Do not run git, a build or a test to gather facts.",
+		"Tell the user about the checkpoint in one sentence, and recommend that they compact. You cannot run /compact yourself, so give them this line to run when the turn ends: " + compact,
+		"Keep working on the task.",
 	}
 	var b strings.Builder
-	b.WriteString("clusage checkpoint: the " + strings.Join(head, " The ") + " This is a checkpoint, not a limit, and no call is denied. Finish the step in progress first, and do not stop in the middle of an edit. Then:")
+	b.WriteString("clusage checkpoint: the " + strings.Join(head, " The ") + " This is a checkpoint, not a limit, and no call is denied. Do not stop, and do not ask the user a question. Finish the step in progress first, and do not stop in the middle of an edit. Then:")
 	for i, s := range steps {
 		fmt.Fprintf(&b, " %d. %s", i+1, s)
 	}

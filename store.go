@@ -59,8 +59,9 @@ type Guard struct {
 	Soft5h int `json:"soft_5h_percent"`
 	// Hard7d denies without polling once the 7d window passes this percent.
 	Hard7d int `json:"hard_7d_percent"`
-	// Checkpoint5h and Checkpoint7d ask the main agent to update its tracker
-	// once a window reaches this percent. They deny nothing. 0 turns one off.
+	// Checkpoint5h and Checkpoint7d ask the main agent to update its docs and
+	// recommend a compaction once a window reaches this percent. They deny
+	// nothing. 0 turns one off.
 	Checkpoint5h int `json:"checkpoint_5h_percent"`
 	Checkpoint7d int `json:"checkpoint_7d_percent"`
 	// Interval is the seconds between checks at low usage, IntervalMin the
